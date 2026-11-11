@@ -21,6 +21,7 @@ class SimulationApp:
         self._cmd_queue: queue.Queue[tuple[Callable[[RobotSimulation], dict], queue.Queue]] = queue.Queue()
         self._http_server: ThreadingHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
+        self._viewer_reload_pending = False
         self._closed = False
 
     def submit_command(self, fn: Callable[[RobotSimulation], dict], timeout: float = 5.0) -> tuple[int, dict]:
@@ -136,6 +137,18 @@ class SimulationApp:
                 elif path == "/reset":
                     target_xy = body.get("target_xy")
                     code, payload = app.submit_command(lambda sim: sim.reset(target_xy=target_xy))
+                elif path == "/reload":
+                    preserve_target = body.get("preserve_target", True)
+                    target_xy = body.get("target_xy")
+
+                    def _do_reload(sim: RobotSimulation) -> dict:
+                        st = sim.reload(preserve_target=preserve_target)
+                        if target_xy is not None:
+                            st = sim.reset(target_xy=target_xy)
+                        app._viewer_reload_pending = True
+                        return st
+
+                    code, payload = app.submit_command(_do_reload)
                 elif path == "/camera":
                     camera = body.get("camera", "front_cam")
                     out_path = body.get("path")
@@ -211,6 +224,11 @@ class SimulationApp:
                     self.process_pending_commands()
                     for _ in range(steps):
                         self.sim.step_once()
+                if self._viewer_reload_pending:
+                    self._viewer_reload_pending = False
+                    raw_sim = viewer._get_sim()
+                    if raw_sim is not None:
+                        raw_sim.load(self.sim.model, self.sim.data, str(self.sim.model_path))
                 viewer.sync()
                 sleep_s = frame_dt - (time.perf_counter() - t0)
                 if sleep_s > 0:

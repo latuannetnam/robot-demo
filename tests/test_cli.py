@@ -138,3 +138,49 @@ def test_cli_status_hides_debug_by_default_and_commands_work(capsys, tmp_path: P
 
     if err_holder:
         raise err_holder[0]
+
+
+def test_cli_scan_approach_and_reload_never_leak_debug_field(capsys):
+    app = SimulationApp()
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    stop_evt = threading.Event()
+    outputs: dict[str, str] = {}
+    err_holder: list[BaseException] = []
+
+    def run_cli_calls():
+        try:
+            assert robot_ctl.main(["--url", url, "reset", "--target-x", "0.75", "--target-y", "0.0"]) == 0
+            capsys.readouterr()
+
+            assert robot_ctl.main(["--url", url, "reload", "--vision"]) == 0
+            outputs["reload"] = capsys.readouterr().out
+
+            assert robot_ctl.main(["--url", url, "scan", "--max-degrees", "90"]) == 0
+            outputs["scan"] = capsys.readouterr().out
+
+            assert robot_ctl.main(["--url", url, "approach", "--stop-distance", "0.28"]) == 0
+            outputs["approach"] = capsys.readouterr().out
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=run_cli_calls, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=12)
+            time.sleep(0.004)
+        t.join(timeout=15.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    for name, raw_out in outputs.items():
+        parsed = json.loads(raw_out)
+        assert "debug" not in raw_out, f"'{name}' leaked debug field: {raw_out}"
+        assert isinstance(parsed, dict)
+

@@ -75,6 +75,7 @@ class RobotSimulation:
         self.data = mujoco.MjData(self.model)
         self._default_target_pos = self.data.mocap_pos[0].copy()
         self._command_deadline: float | None = None
+        self._gyro_yaw_rad: float = 0.0
         self._renderer: mujoco.Renderer | None = None
         self._renderer_size: tuple[int, int] | None = None
         self._clean_vis_opt = mujoco.MjvOption()
@@ -130,6 +131,7 @@ class RobotSimulation:
         self._default_target_pos = self.data.mocap_pos[0].copy()
         self._sensor_adr = new_sensor_adr
         self._command_deadline = None
+        self._gyro_yaw_rad = 0.0
         if preserve_target:
             self.data.mocap_pos[0] = [
                 float(prev_target_pos[0]),
@@ -200,6 +202,7 @@ class RobotSimulation:
         mujoco.mj_resetData(self.model, self.data)
         self.data.mocap_pos[0] = [tx, ty, float(self._default_target_pos[2])]
         self._command_deadline = None
+        self._gyro_yaw_rad = 0.0
         mujoco.mj_forward(self.model, self.data)
         return self.get_status()
 
@@ -207,6 +210,8 @@ class RobotSimulation:
         if self._command_deadline is not None and self.data.time >= self._command_deadline:
             self.stop()
         mujoco.mj_step(self.model, self.data)
+        gyro_z = float(self.data.sensordata[self._sensor_adr["chassis_gyro"] + 2])
+        self._gyro_yaw_rad += gyro_z * float(self.model.opt.timestep)
         if self._command_deadline is not None and self.data.time >= self._command_deadline:
             self.stop()
 
@@ -258,6 +263,7 @@ class RobotSimulation:
                 "wheel_vel_rad_s": {"left": round(left_vel, 4), "right": round(right_vel, 4)},
                 "forward_speed_m_s": round(forward_speed, 4),
                 "yaw_rate_rad_s": round(yaw_rate, 4),
+                "gyro_yaw_deg": round(math.degrees(self._gyro_yaw_rad), 3),
             },
             "debug": {
                 "robot_xy": [round(float(self.data.qpos[0]), 4), round(float(self.data.qpos[1]), 4)],

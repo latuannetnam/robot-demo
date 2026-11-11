@@ -96,3 +96,41 @@ def test_reset_and_camera_reject_malformed_types_with_400(tmp_path: Path):
     for key in ("bool_xy", "str_xy", "null_cam", "dir_path", "empty_path"):
         assert results[key][0] == 400, f"{key} returned {results[key]}"
         assert results[key][1]["ok"] is False
+
+
+def test_server_reload_preserves_target_and_rejects_invalid_model_with_400():
+    app = SimulationApp()
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    base = f"http://{host}:{port}"
+    stop_evt = threading.Event()
+    results: dict = {}
+
+    def client_worker():
+        try:
+            results["reset"] = _request(f"{base}/reset", "POST", {"target_xy": [-1.3, 1.1]})
+            results["reload_keep"] = _request(f"{base}/reload", "POST", {"preserve_target": True})
+            results["reload_new_target"] = _request(
+                f"{base}/reload", "POST", {"preserve_target": True, "target_xy": [1.1, -0.9]}
+            )
+            results["bad_preserve"] = _request(f"{base}/reload", "POST", {"preserve_target": "not_bool"})
+            results["bad_target"] = _request(f"{base}/reload", "POST", {"target_xy": [9.0, 0.0]})
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=client_worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=5)
+            time.sleep(0.005)
+        t.join(timeout=5.0)
+    finally:
+        app.shutdown()
+
+    assert results["reload_keep"][0] == 200
+    assert results["reload_keep"][1]["data"]["debug"]["target_xy"] == [-1.3, 1.1]
+    assert results["reload_new_target"][0] == 200
+    assert results["reload_new_target"][1]["data"]["debug"]["target_xy"] == [1.1, -0.9]
+    assert results["bad_preserve"][0] == 400
+    assert results["bad_target"][0] == 400
+

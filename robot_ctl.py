@@ -9,6 +9,8 @@ import time
 import urllib.error
 import urllib.request
 
+from robot_sim.skills import approach_target, closed_loop_turn, scan_for_target, wait_until_settled
+
 DEFAULT_URL = "http://127.0.0.1:8765"
 
 
@@ -59,15 +61,9 @@ def _strip_debug(status_data: dict, keep_debug: bool) -> dict:
 
 
 def _wait_for_completion(base_url: str, duration_s: float, include_vision: bool = False) -> dict:
-    """Chờ cho tới khi mô phỏng hoàn tất lệnh chuyển động (moving == False)."""
-    deadline = time.monotonic() + max(3.0, duration_s * 4.0)
-    time.sleep(min(max(0.0, duration_s * 0.5), 0.25))
-    status_path = "/status?vision=1" if include_vision else "/status"
-    status = _call_bridge(base_url, status_path, "GET")
-    while status.get("moving", False) and time.monotonic() < deadline:
-        time.sleep(0.05)
-        status = _call_bridge(base_url, status_path, "GET")
-    return _strip_debug(status, keep_debug=False)
+    """Chờ cho tới khi mô phỏng hoàn tất lệnh chuyển động và thân xe tắt hẳn dao động."""
+    call_fn = lambda path, method="GET", payload=None: _call_bridge(base_url, path, method, payload)
+    return wait_until_settled(call_fn, duration_s=duration_s, include_vision=include_vision)
 
 
 def _run_reactive_demo(base_url: str, steps: int, step_dt: float) -> dict:
@@ -169,8 +165,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_turn.add_argument("degrees", type=float, nargs="?", default=None, help="Góc xoay (độ, + trái / - phải)")
     p_turn.add_argument("--degrees", dest="degrees_opt", type=float, default=None, help="Góc xoay (độ)")
     p_turn.add_argument("--speed", type=float, default=60.0, help="Tốc độ xoay (độ/s, mặc định: 60)")
-    p_turn.add_argument("--wait", action="store_true", help="Chờ xe xoay xong rồi in cảm biến mới")
+    p_turn.add_argument("--wait", action="store_true", help="Chờ xe xoay xong (mặc định dùng hồi tiếp Gyro khép kín)")
     p_turn.add_argument("--vision", action="store_true", help="Kèm tóm tắt Edge Vision trong after_status khi dùng --wait")
+    p_turn.add_argument("--open-loop", action="store_true", help="Xoay vòng hở theo thời gian cố định thay vì Gyro")
+
+    p_scan = sub.add_parser("scan", help="Quét vòng tròn 20Hz tìm mục tiêu xanh lá và tự căn tâm (chuẩn Sim-to-Real)")
+    p_scan.add_argument("--max-degrees", type=float, default=360.0, help="Góc quét tối đa (0..720, mặc định: 360)")
+    p_scan.add_argument("--direction", default="left", choices=["left", "right"], help="Chiều quét (left hoặc right)")
+    p_scan.add_argument("--speed", type=float, default=75.0, help="Tốc độ góc khi quét (độ/s, mặc định: 75)")
+
+    p_approach = sub.add_parser("approach", help="Tiếp cận mục tiêu xanh khép kín 20Hz kết hợp né vật cản gần")
+    p_approach.add_argument("--stop-distance", type=float, default=0.25, help="Khoảng cách dừng trước đích (0.12..1.5m)")
+    p_approach.add_argument("--max-steps", type=int, default=65, help="Số nhịp điều khiển tối đa (mặc định: 65)")
+    p_approach.add_argument("--step-dt", type=float, default=0.18, help="Chu kỳ mỗi nhịp điều khiển (giây)")
 
     sub.add_parser("stop", help="Dừng khẩn cấp hai động cơ bánh xe")
 
@@ -178,6 +185,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_reset.add_argument("--target-x", type=float, default=None, help="Tọa độ X mới của mục tiêu (-1.7..1.7)")
     p_reset.add_argument("--target-y", type=float, default=None, help="Tọa độ Y mới của mục tiêu (-1.7..1.7)")
     p_reset.add_argument("--vision", action="store_true", help="Kèm tóm tắt Edge Vision ngay sau khi reset")
+
+    p_reload = sub.add_parser("reload", help="Kiểm định chống gian lận và nạp nóng lại models/arena_2wheel.xml")
+    p_reload.add_argument("--no-preserve-target", action="store_true", help="Đặt lại vị trí mục tiêu mặc định khi reload")
+    p_reload.add_argument("--target-x", type=float, default=None, help="Tọa độ X mới của mục tiêu (-1.7..1.7)")
+    p_reload.add_argument("--target-y", type=float, default=None, help="Tọa độ Y mới của mục tiêu (-1.7..1.7)")
+    p_reload.add_argument("--vision", action="store_true", help="Kèm tóm tắt Edge Vision ngay sau khi reload")
 
     p_demo = sub.add_parser("demo", help="Chạy thử vòng lặp tự hành cổ điển (dùng Edge Vision + cảm biến khoảng cách)")
     p_demo.add_argument("--steps", type=int, default=25, help="Số nhịp điều khiển tối đa (mặc định: 25)")
@@ -236,16 +249,41 @@ def main(argv: list[str] | None = None) -> int:
             degrees = args.degrees_opt if args.degrees_opt is not None else args.degrees
             if degrees is None:
                 raise BridgeRequestError("Vui lòng truyền góc xoay (ví dụ: turn 45 hoặc turn -45).")
-            output = _call_bridge(
-                args.url,
-                "/turn",
-                "POST",
-                {"degrees": degrees, "angular_speed": args.speed},
-            )
-            if args.wait:
-                output["after_status"] = _wait_for_completion(
-                    args.url, output["duration_s"], include_vision=args.vision
+            if args.wait and not args.open_loop:
+                call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
+                output = closed_loop_turn(
+                    call_fn,
+                    degrees=degrees,
+                    max_speed_deg_s=args.speed,
+                    include_vision=args.vision,
                 )
+            else:
+                output = _call_bridge(
+                    args.url,
+                    "/turn",
+                    "POST",
+                    {"degrees": degrees, "angular_speed": args.speed},
+                )
+                if args.wait:
+                    output["after_status"] = _wait_for_completion(
+                        args.url, output["duration_s"], include_vision=args.vision
+                    )
+        elif args.command == "scan":
+            call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
+            output = scan_for_target(
+                call_fn,
+                max_degrees=args.max_degrees,
+                direction=args.direction,
+                angular_speed_deg_s=args.speed,
+            )
+        elif args.command == "approach":
+            call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
+            output = approach_target(
+                call_fn,
+                stop_distance=args.stop_distance,
+                max_steps=args.max_steps,
+                step_dt=args.step_dt,
+            )
         elif args.command == "stop":
             output = _call_bridge(args.url, "/stop", "POST", {})
         elif args.command == "reset":
@@ -253,6 +291,19 @@ def main(argv: list[str] | None = None) -> int:
                 raise BridgeRequestError("Cần truyền cả --target-x lẫn --target-y khi đổi vị trí mục tiêu.")
             target_xy = [args.target_x, args.target_y] if args.target_x is not None else None
             res = _call_bridge(args.url, "/reset", "POST", {"target_xy": target_xy})
+            output = _strip_debug(res, keep_debug=False)
+            if args.vision:
+                output["vision"] = _call_bridge(args.url, "/vision?camera=front_cam", "GET")
+        elif args.command == "reload":
+            if (args.target_x is None) != (args.target_y is None):
+                raise BridgeRequestError("Cần truyền cả --target-x lẫn --target-y khi đổi vị trí mục tiêu.")
+            target_xy = [args.target_x, args.target_y] if args.target_x is not None else None
+            res = _call_bridge(
+                args.url,
+                "/reload",
+                "POST",
+                {"preserve_target": not args.no_preserve_target, "target_xy": target_xy},
+            )
             output = _strip_debug(res, keep_debug=False)
             if args.vision:
                 output["vision"] = _call_bridge(args.url, "/vision?camera=front_cam", "GET")
@@ -266,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
 
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0
-    except (BridgeOfflineError, BridgeRequestError) as exc:
+    except (BridgeOfflineError, BridgeRequestError, ValueError) as exc:
         print(f"[Lỗi điều khiển robot] {exc}", file=sys.stderr)
         return 1
 
