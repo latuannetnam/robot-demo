@@ -8,8 +8,9 @@ import queue
 import threading
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
-from robot_sim.core import RobotSimulation
+from robot_sim.core import DEFAULT_CAMERA_HEIGHT, DEFAULT_CAMERA_WIDTH, DEFAULT_JPEG_QUALITY, RobotSimulation
 
 
 class SimulationApp:
@@ -81,8 +82,15 @@ class SimulationApp:
                 return parsed
 
             def do_GET(self) -> None:
-                if self.path == "/status":
-                    code, payload = app.submit_command(lambda sim: sim.get_status())
+                parsed_url = urlsplit(self.path)
+                query = parse_qs(parsed_url.query)
+                if parsed_url.path == "/status":
+                    inc_vis = query.get("vision", ["0"])[0] in ("1", "true", "yes")
+                    code, payload = app.submit_command(lambda sim: sim.get_status(include_vision=inc_vis))
+                    self._send_json(code, payload)
+                elif parsed_url.path == "/vision":
+                    cam_name = query.get("camera", ["front_cam"])[0]
+                    code, payload = app.submit_command(lambda sim: sim.analyze_vision(camera_name=cam_name))
                     self._send_json(code, payload)
                 else:
                     self._send_json(404, {"ok": False, "error": f"Không hỗ trợ đường dẫn GET '{self.path}'."})
@@ -131,8 +139,19 @@ class SimulationApp:
                 elif path == "/camera":
                     camera = body.get("camera", "front_cam")
                     out_path = body.get("path")
+                    width = body.get("width", DEFAULT_CAMERA_WIDTH)
+                    height = body.get("height", DEFAULT_CAMERA_HEIGHT)
+                    img_format = body.get("format")
+                    quality = body.get("quality", DEFAULT_JPEG_QUALITY)
                     code, payload = app.submit_command(
-                        lambda sim: sim.capture_camera(camera_name=camera, out_path=out_path)
+                        lambda sim: sim.capture_camera(
+                            camera_name=camera,
+                            out_path=out_path,
+                            width=width,
+                            height=height,
+                            img_format=img_format,
+                            quality=quality,
+                        )
                     )
                 else:
                     self._send_json(404, {"ok": False, "error": f"Không hỗ trợ đường dẫn POST '{path}'."})

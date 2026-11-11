@@ -84,6 +84,8 @@ def test_cli_status_hides_debug_by_default_and_commands_work(capsys, tmp_path: P
     url = f"http://{host}:{port}"
     stop_evt = threading.Event()
 
+    err_holder: list[BaseException] = []
+
     def run_cli_calls():
         try:
             assert robot_ctl.main(["--url", url, "status"]) == 0
@@ -94,13 +96,22 @@ def test_cli_status_hides_debug_by_default_and_commands_work(capsys, tmp_path: P
             out_debug = json.loads(capsys.readouterr().out)
             assert "debug" in out_debug
 
-            cam_file = tmp_path / "cam.png"
-            assert robot_ctl.main(["--url", url, "camera", "--name", "front_cam", "--out", str(cam_file)]) == 0
-            capsys.readouterr()
-            assert cam_file.is_file()
+            assert robot_ctl.main(["--url", url, "status", "--vision"]) == 0
+            out_vis_status = json.loads(capsys.readouterr().out)
+            assert "vision" in out_vis_status and "debug" not in out_vis_status
 
-            assert robot_ctl.main(["--url", url, "turn", "-45"]) == 0
-            capsys.readouterr()
+            assert robot_ctl.main(["--url", url, "vision"]) == 0
+            out_vis = json.loads(capsys.readouterr().out)
+            assert "target_visible" in out_vis and "obstacles" in out_vis
+
+            cam_file = tmp_path / "cam.jpg"
+            assert robot_ctl.main(["--url", url, "camera", "--name", "front_cam", "--out", str(cam_file)]) == 0
+            cam_info = json.loads(capsys.readouterr().out)
+            assert cam_file.is_file() and cam_info["format"] == "JPEG"
+
+            assert robot_ctl.main(["--url", url, "turn", "-45", "--wait", "--vision"]) == 0
+            turn_info = json.loads(capsys.readouterr().out)
+            assert "vision" in turn_info["after_status"]
 
             assert robot_ctl.main(["--url", url, "move", "-0.2"]) == 0
             capsys.readouterr()
@@ -110,6 +121,8 @@ def test_cli_status_hides_debug_by_default_and_commands_work(capsys, tmp_path: P
 
             assert robot_ctl.main(["--url", url, "demo", "--steps", "3"]) == 0
             capsys.readouterr()
+        except BaseException as exc:
+            err_holder.append(exc)
         finally:
             stop_evt.set()
 
@@ -122,3 +135,6 @@ def test_cli_status_hides_debug_by_default_and_commands_work(capsys, tmp_path: P
         t.join(timeout=10.0)
     finally:
         app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]

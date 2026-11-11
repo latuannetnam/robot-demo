@@ -37,8 +37,10 @@ def test_http_bridge_drives_captures_and_survives_bad_requests(tmp_path: Path):
             results["move"] = _request(f"{base}/move", "POST", {"meters": 0.25, "speed": 0.25})
             time.sleep(0.35)
             results["bad_cam"] = _request(f"{base}/camera", "POST", {"camera": "bad_cam"})
-            out_png = str(tmp_path / "front.png")
-            results["good_cam"] = _request(f"{base}/camera", "POST", {"camera": "front_cam", "path": out_png})
+            out_jpg = str(tmp_path / "front.jpg")
+            results["good_cam"] = _request(f"{base}/camera", "POST", {"camera": "front_cam", "path": out_jpg})
+            results["vision"] = _request(f"{base}/vision", "GET")
+            results["status_vis"] = _request(f"{base}/status?vision=1", "GET")
             results["status"] = _request(f"{base}/status", "GET")
         finally:
             stop_evt.set()
@@ -57,7 +59,10 @@ def test_http_bridge_drives_captures_and_survives_bad_requests(tmp_path: Path):
     assert results["move"][0] == 200
     assert results["bad_cam"][0] == 400 and results["bad_cam"][1]["ok"] is False
     assert results["good_cam"][0] == 200 and Path(results["good_cam"][1]["data"]["path"]).is_file()
-    assert results["status"][0] == 200
+    assert results["good_cam"][1]["data"]["format"] == "JPEG"
+    assert results["vision"][0] == 200 and "target_visible" in results["vision"][1]["data"]
+    assert results["status_vis"][0] == 200 and "vision" in results["status_vis"][1]["data"]
+    assert results["status"][0] == 200 and "vision" not in results["status"][1]["data"]
     assert results["status"][1]["data"]["debug"]["robot_xy"][0] > 0.03
 
 

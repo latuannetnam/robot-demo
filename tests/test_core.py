@@ -81,16 +81,54 @@ def test_move_and_turn_kinematics_and_reset_bounds():
         sim.close()
 
 
-def test_capture_camera_creates_png_and_rejects_unknown_camera(tmp_path: Path):
+def test_capture_camera_defaults_to_compact_jpeg_and_supports_png_override(tmp_path: Path):
     sim = RobotSimulation()
     try:
-        out_file = tmp_path / "nested" / "front.png"
-        info = sim.capture_camera("front_cam", out_path=out_file)
-        assert out_file.is_file()
-        assert out_file.stat().st_size > 1000
-        assert info["width"] == 640 and info["height"] == 480
+        # Default capture: 320x240 compact JPEG (< 12 KB)
+        jpg_file = tmp_path / "compact" / "front.jpg"
+        info_jpg = sim.capture_camera("front_cam", out_path=jpg_file)
+        assert jpg_file.is_file()
+        assert info_jpg["format"] == "JPEG"
+        assert info_jpg["width"] == 320 and info_jpg["height"] == 240
+        assert 300 < info_jpg["bytes"] < 12000
+
+        # Explicit high-res PNG override remains supported
+        png_file = tmp_path / "nested" / "front.png"
+        info_png = sim.capture_camera("front_cam", out_path=png_file, width=640, height=480, img_format="png")
+        assert png_file.is_file()
+        assert info_png["format"] == "PNG"
+        assert info_png["width"] == 640 and info_png["height"] == 480
 
         with pytest.raises(ValueError):
-            sim.capture_camera("nonexistent_cam", out_path=out_file)
+            sim.capture_camera("nonexistent_cam", out_path=jpg_file)
+    finally:
+        sim.close()
+
+
+def test_analyze_vision_detects_green_target_and_colored_obstacles_in_ram():
+    sim = RobotSimulation()
+    try:
+        # 1. Default reset places green target at (1.4, 0.0) directly ahead of robot nose (+X),
+        #    with blue obstacle at (0.85, -0.75) visible on the right side of the frame
+        sim.reset(target_xy=(1.2, 0.0))
+        vis = sim.analyze_vision("front_cam")
+        assert vis["target_visible"] is True
+        assert vis["target"] is not None
+        assert abs(vis["target"]["offset_x"]) < 0.15
+        assert vis["target"]["side"] == "center"
+        assert vis["target"]["area_pct"] > 0.5
+        obs_colors = {o["color"]: o for o in vis["obstacles"]}
+        assert "blue" in obs_colors
+        assert obs_colors["blue"]["side"] == "right"
+
+        # 2. Facing (-X, -Y) empty corner with target behind robot at (+1.4, +1.4)
+        #    should see neither target nor false-positive yellow laser beams
+        sim.reset(target_xy=(1.4, 1.4))
+        yaw = -3.0 * math.pi / 4.0
+        sim.data.qpos[3:7] = [math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)]
+        vis_empty = sim.analyze_vision("front_cam")
+        assert vis_empty["target_visible"] is False
+        assert vis_empty["target"] is None
+        assert vis_empty["obstacles"] == []
     finally:
         sim.close()

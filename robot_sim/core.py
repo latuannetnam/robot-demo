@@ -12,8 +12,11 @@ MAX_WHEEL_RAD_S = 15.0
 MAX_COMMAND_DURATION = 10.0
 RANGEFINDER_MAX = 3.0
 ARENA_SAFE_LIMIT = 1.7
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
+DEFAULT_CAMERA_WIDTH = 320
+DEFAULT_CAMERA_HEIGHT = 240
+MAX_CAMERA_WIDTH = 640
+MAX_CAMERA_HEIGHT = 480
+DEFAULT_JPEG_QUALITY = 75
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "arena_2wheel.xml"
@@ -71,6 +74,9 @@ class RobotSimulation:
         self._default_target_pos = self.data.mocap_pos[0].copy()
         self._command_deadline: float | None = None
         self._renderer: mujoco.Renderer | None = None
+        self._renderer_size: tuple[int, int] | None = None
+        self._clean_vis_opt = mujoco.MjvOption()
+        self._clean_vis_opt.flags[mujoco.mjtVisFlag.mjVIS_RANGEFINDER] = 0
 
         self._sensor_adr = {
             name: int(self.model.sensor_adr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, name)])
@@ -90,6 +96,16 @@ class RobotSimulation:
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None
+            self._renderer_size = None
+
+    def _get_renderer(self, width: int, height: int) -> mujoco.Renderer:
+        if self._renderer is not None and self._renderer_size != (width, height):
+            self._renderer.close()
+            self._renderer = None
+        if self._renderer is None:
+            self._renderer = mujoco.Renderer(self.model, height=height, width=width)
+            self._renderer_size = (width, height)
+        return self._renderer
 
     def set_wheels(self, left_rad_s: float, right_rad_s: float, duration: float = 1.0) -> dict:
         _require_finite(left_rad_s=left_rad_s, right_rad_s=right_rad_s, duration=duration)
@@ -167,7 +183,7 @@ class RobotSimulation:
             return RANGEFINDER_MAX, False
         return round(raw, 4), True
 
-    def get_status(self) -> dict:
+    def get_status(self, include_vision: bool = False) -> dict:
         mujoco.mj_forward(self.model, self.data)
         rf_l, hit_l = self._read_rangefinder("rf_left")
         rf_c, hit_c = self._read_rangefinder("rf_center")
@@ -191,7 +207,7 @@ class RobotSimulation:
             else 0.0
         )
 
-        return {
+        result = {
             "sim_time": round(float(self.data.time), 4),
             "moving": remaining > 0.0,
             "command_remaining_s": round(remaining, 4),
@@ -211,35 +227,132 @@ class RobotSimulation:
                 ],
             },
         }
+        if include_vision:
+            result["vision"] = self.analyze_vision("front_cam")
+        return result
 
-    def capture_camera(self, camera_name: str = "front_cam", out_path: Path | str | None = None) -> dict:
+    def _validate_camera_name(self, camera_name: str) -> None:
         if not isinstance(camera_name, str) or not camera_name.strip():
             raise ValueError("Tên camera phải là chuỗi hợp lệ ('front_cam' hoặc 'overview_cam').")
         cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
         if cam_id < 0:
             raise ValueError(f"Không tìm thấy camera '{camera_name}'. Chọn 'front_cam' hoặc 'overview_cam'.")
 
+    @staticmethod
+    def _summarize_mask(mask: np.ndarray, min_area_pct: float = 0.12) -> dict | None:
+        total = mask.shape[0] * mask.shape[1]
+        count = int(mask.sum())
+        area_pct = (100.0 * count) / float(total)
+        if area_pct < min_area_pct:
+            return None
+        xs = np.where(mask)[1]
+        half_w = mask.shape[1] / 2.0
+        offset_x = (float(xs.mean()) - half_w) / half_w
+        if offset_x < -0.20:
+            side = "left"
+        elif offset_x > 0.20:
+            side = "right"
+        else:
+            side = "center"
+        return {
+            "offset_x": round(offset_x, 3),
+            "side": side,
+            "area_pct": round(area_pct, 2),
+        }
+
+    def analyze_vision(self, camera_name: str = "front_cam") -> dict:
+        """Phân tích trực tiếp khung hình camera trong RAM (không ghi đĩa) để trích xuất đích xanh & vật cản."""
+        self._validate_camera_name(camera_name)
+        width, height = DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT
+        mujoco.mj_forward(self.model, self.data)
+        renderer = self._get_renderer(width=width, height=height)
+        renderer.update_scene(self.data, camera=camera_name, scene_option=self._clean_vis_opt)
+        arr = renderer.render().astype(np.int16)
+
+        r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+        green_mask = (g > 110) & ((g - r) > 50) & ((g - b) > 45)
+        red_mask = (r > 110) & ((r - g) > 45) & ((r - b) > 45)
+        blue_mask = (b > 95) & (r < 120) & ((b - r) > 50) & ((b - g) > 25)
+        yellow_mask = (r > 115) & (g > 90) & (b < 85) & ((r - b) > 60) & ((g - b) > 45)
+
+        target_info = self._summarize_mask(green_mask)
+        obstacles: list[dict] = []
+        for color_name, c_mask in (("yellow", yellow_mask), ("red", red_mask), ("blue", blue_mask)):
+            summary = self._summarize_mask(c_mask)
+            if summary is not None:
+                obstacles.append({"color": color_name, **summary})
+        obstacles.sort(key=lambda item: item["area_pct"], reverse=True)
+
+        return {
+            "camera": camera_name,
+            "width": width,
+            "height": height,
+            "target_visible": target_info is not None,
+            "target": target_info,
+            "obstacles": obstacles,
+        }
+
+    def capture_camera(
+        self,
+        camera_name: str = "front_cam",
+        out_path: Path | str | None = None,
+        width: int = DEFAULT_CAMERA_WIDTH,
+        height: int = DEFAULT_CAMERA_HEIGHT,
+        img_format: str | None = None,
+        quality: int = DEFAULT_JPEG_QUALITY,
+    ) -> dict:
+        self._validate_camera_name(camera_name)
+        if isinstance(width, bool) or not isinstance(width, int) or not (64 <= width <= MAX_CAMERA_WIDTH):
+            raise ValueError(f"Chiều rộng ảnh 'width' phải là số nguyên trong [64, {MAX_CAMERA_WIDTH}].")
+        if isinstance(height, bool) or not isinstance(height, int) or not (48 <= height <= MAX_CAMERA_HEIGHT):
+            raise ValueError(f"Chiều cao ảnh 'height' phải là số nguyên trong [48, {MAX_CAMERA_HEIGHT}].")
+        if isinstance(quality, bool) or not isinstance(quality, int) or not (10 <= quality <= 95):
+            raise ValueError("Chất lượng nén JPEG 'quality' phải là số nguyên trong [10, 95].")
+
+        fmt: str
+        if img_format is not None:
+            if not isinstance(img_format, str):
+                raise ValueError("Định dạng 'format' phải là 'jpg' hoặc 'png'.")
+            norm_fmt = img_format.strip().lower()
+            if norm_fmt in ("jpg", "jpeg"):
+                fmt = "JPEG"
+            elif norm_fmt == "png":
+                fmt = "PNG"
+            else:
+                raise ValueError(f"Định dạng ảnh '{img_format}' không hỗ trợ (chọn 'jpg' hoặc 'png').")
+        elif out_path is not None and str(out_path).strip().lower().endswith(".png"):
+            fmt = "PNG"
+        else:
+            fmt = "JPEG"
+
+        ext = "png" if fmt == "PNG" else "jpg"
         if out_path is not None:
             if not isinstance(out_path, (str, Path)) or (isinstance(out_path, str) and not out_path.strip()):
-                raise ValueError("Đường dẫn lưu ảnh 'path' phải là chuỗi tên file PNG hợp lệ.")
+                raise ValueError("Đường dẫn lưu ảnh 'path' phải là chuỗi tên file hợp lệ.")
             target_path = Path(out_path).resolve()
         else:
-            target_path = (DEFAULT_CAPTURES_DIR / f"{camera_name}.png").resolve()
+            target_path = (DEFAULT_CAPTURES_DIR / f"{camera_name}.{ext}").resolve()
 
         if target_path.exists() and target_path.is_dir():
-            raise ValueError(f"Đường dẫn '{target_path}' là thư mục; vui lòng truyền đường dẫn tới file .png.")
+            raise ValueError(f"Đường dẫn '{target_path}' là thư mục; vui lòng truyền đường dẫn tới file .{ext}.")
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         mujoco.mj_forward(self.model, self.data)
-        if self._renderer is None:
-            self._renderer = mujoco.Renderer(self.model, height=CAMERA_HEIGHT, width=CAMERA_WIDTH)
-        self._renderer.update_scene(self.data, camera=camera_name)
-        rgb = self._renderer.render()
-        Image.fromarray(rgb).save(target_path, format="PNG")
+        renderer = self._get_renderer(width=width, height=height)
+        renderer.update_scene(self.data, camera=camera_name)
+        rgb = renderer.render()
+
+        pil_img = Image.fromarray(rgb)
+        if fmt == "JPEG":
+            pil_img.save(target_path, format="JPEG", quality=quality, optimize=True)
+        else:
+            pil_img.save(target_path, format="PNG")
 
         return {
             "camera": camera_name,
             "path": str(target_path),
-            "width": CAMERA_WIDTH,
-            "height": CAMERA_HEIGHT,
+            "width": width,
+            "height": height,
+            "format": fmt,
+            "bytes": int(target_path.stat().st_size),
         }

@@ -33,26 +33,30 @@ Cửa sổ 3D MuJoCo sẽ hiện lên:
 ### Bước 2: Tự tay điều khiển thử từ cửa sổ PowerShell thứ hai
 
 ```powershell
-# 1. Xem các cảm biến trên xe đang đo được gì (khoảng cách trái/giữa/phải, tốc độ bánh)
-uv run python robot_ctl.py status
+# 1. Xem cảm biến khoảng cách KÈM tóm tắt thị giác tại biên (Edge Vision JSON siêu nhẹ, không tốn ảnh!)
+uv run python robot_ctl.py status --vision
 
-# 2. Chụp ảnh góc nhìn thứ nhất từ camera gắn ở mũi xe (lưu tại captures/front_cam.png)
+# 2. Chỉ đọc riêng bản phân tích thị giác trong RAM (đích xanh, hộp cản màu, hướng lệch ngang)
+uv run python robot_ctl.py vision
+
+# 3. Chụp ảnh từ camera mũi xe (mặc định nén JPEG 320x240 chỉ ~3-6 KB tại captures/front_cam.jpg)
 uv run python robot_ctl.py camera
+# (Tùy chọn xuất ảnh nét PNG 640x480 nếu cần lưu tư liệu: uv run python robot_ctl.py camera --format png --width 640 --height 480)
 
-# 3. Cho xe tiến thẳng 0.5 mét và chờ chạy xong
-uv run python robot_ctl.py move 0.5 --wait
+# 4. Cho xe tiến thẳng 0.5 mét, chờ dừng hẳn rồi báo lại cả cảm biến lẫn Edge Vision
+uv run python robot_ctl.py move 0.5 --wait --vision
 
-# 4. Cho xe xoay trái 45 độ (số âm như -45 để xoay phải)
-uv run python robot_ctl.py turn 45 --wait
+# 5. Cho xe xoay trái 45 độ (số âm như -45 để xoay phải)
+uv run python robot_ctl.py turn 45 --wait --vision
 
-# 5. Điều khiển trực tiếp vận tốc góc 2 bánh trái/phải (rad/s) để đi đường cong
+# 6. Điều khiển trực tiếp vận tốc góc 2 bánh trái/phải (rad/s) để đi đường cong
 uv run python robot_ctl.py wheels 4.0 7.0 --duration 1.5 --wait
 
-# 6. Chạy thử vòng lặp tự hành bằng Python thuần (tự nhìn màu xanh + né hộp cản)
+# 7. Chạy thử vòng lặp tự hành tốc độ cao (xử lý Edge Vision trực tiếp trong RAM)
 uv run python robot_ctl.py demo --steps 30
 
-# 7. Đặt lại vị trí ban đầu (có thể đổi tọa độ đích nằm trong [-1.7, 1.7])
-uv run python robot_ctl.py reset --target-x -1.2 --target-y 1.0
+# 8. Đặt lại vị trí ban đầu (có thể đổi tọa độ đích nằm trong [-1.7, 1.7])
+uv run python robot_ctl.py reset --target-x -1.2 --target-y 1.0 --vision
 ```
 
 ---
@@ -63,8 +67,8 @@ Khi `sim_server.py` đang mở cửa sổ 3D trên màn hình, bạn chỉ cần
 
 > *"Hãy đặt mục tiêu sang tọa độ `(-1.2, 1.1)`, sau đó chỉ dùng camera mũi xe (`front_cam`) và cảm biến khoảng cách trong `robot_ctl.py` để tự tìm và lái xe tới sát trụ màu xanh lá nhé!"*
 
-Antigravity sẽ đóng vai "bộ não" trên robot theo đúng vòng lặp **Cảm nhận → Suy luận → Hành động (Sense → Think → Act)**:
-1. Gọi `robot_ctl.py status` và `robot_ctl.py camera` rồi dùng khả năng thị giác đọc file `captures/front_cam.png`.
+Antigravity sẽ đóng vai "bộ não" trên robot theo đúng vòng lặp **Cảm nhận → Suy luận → Hành động (Sense → Think → Act)** tối ưu tốc độ:
+1. Gọi `robot_ctl.py status --vision` để đọc khoảng cách + **bản tóm tắt thị giác tại biên (Edge Vision JSON < 300 bytes)** phản hồi tức thì mà không làm đầy bộ nhớ ảnh; chỉ khi gặp tình huống phức tạp mới chụp thêm `captures/front_cam.jpg` (`320x240` JPEG siêu nhẹ `~4 KB`).
 2. Nhận biết các khối hộp cản và vị trí trụ đích màu xanh lá trong khung hình.
 3. Gửi từng lệnh `turn` / `move` / `wheels` để bạn xem xe xoay sở trực tiếp trên màn hình 3D.
 
