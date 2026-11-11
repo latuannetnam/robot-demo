@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+import math
+from pathlib import Path
+import mujoco
+import numpy as np
+from PIL import Image
+
+WHEEL_RADIUS = 0.05
+TRACK_WIDTH = 0.23
+MAX_WHEEL_RAD_S = 15.0
+MAX_COMMAND_DURATION = 10.0
+RANGEFINDER_MAX = 3.0
+ARENA_SAFE_LIMIT = 1.7
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "arena_2wheel.xml"
+DEFAULT_CAPTURES_DIR = PROJECT_ROOT / "captures"
+
+
+def _require_finite(**kwargs: float) -> None:
+    for name, val in kwargs.items():
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(float(val)):
+            raise ValueError(f"Tham số '{name}' phải là số hữu hạn hợp lệ (nhận được: {val!r}).")
+
+
+def compute_move_command(meters: float, speed_m_s: float = 0.25) -> tuple[float, float, float]:
+    """Tính vận tốc góc 2 bánh (rad/s) và thời gian (s) để tiến/lùi một quãng đường ước lượng."""
+    _require_finite(meters=meters, speed_m_s=speed_m_s)
+    if speed_m_s <= 0.0:
+        raise ValueError("Tốc độ di chuyển 'speed_m_s' phải lớn hơn 0.")
+    if abs(meters) < 1e-6:
+        raise ValueError("Quãng đường 'meters' phải khác 0.")
+
+    omega = min(abs(speed_m_s) / WHEEL_RADIUS, MAX_WHEEL_RAD_S)
+    effective_speed = omega * WHEEL_RADIUS
+    duration = min(abs(meters) / effective_speed, MAX_COMMAND_DURATION)
+    direction = 1.0 if meters > 0.0 else -1.0
+    return direction * omega, direction * omega, duration
+
+
+def compute_turn_command(degrees: float, angular_deg_s: float = 60.0) -> tuple[float, float, float]:
+    """Tính vận tốc góc 2 bánh (rad/s) và thời gian (s) để xoay tại chỗ (+degrees = quay trái ngược chiều kim đồng hồ)."""
+    _require_finite(degrees=degrees, angular_deg_s=angular_deg_s)
+    if angular_deg_s <= 0.0:
+        raise ValueError("Tốc độ góc 'angular_deg_s' phải lớn hơn 0.")
+    if abs(degrees) < 1e-6:
+        raise ValueError("Góc xoay 'degrees' phải khác 0.")
+
+    target_yaw_rate = math.radians(abs(angular_deg_s))
+    omega = min((target_yaw_rate * TRACK_WIDTH) / (2.0 * WHEEL_RADIUS), MAX_WHEEL_RAD_S)
+    effective_yaw_rate = (2.0 * WHEEL_RADIUS * omega) / TRACK_WIDTH
+    duration = min(math.radians(abs(degrees)) / effective_yaw_rate, MAX_COMMAND_DURATION)
+
+    if degrees > 0.0:
+        # Quay trái (CCW): bánh phải tiến (+), bánh trái lùi (-)
+        return -omega, omega, duration
+    return omega, -omega, duration
+
+
+class RobotSimulation:
+    """Lõi mô phỏng vật lý MuJoCo cho xe robot 2 bánh vi sai."""
+
+    def __init__(self, model_path: Path | str | None = None) -> None:
+        resolved = Path(model_path) if model_path is not None else DEFAULT_MODEL_PATH
+        self.model_path = resolved.resolve()
+        self.model = mujoco.MjModel.from_xml_path(str(self.model_path))
+        self.data = mujoco.MjData(self.model)
+        self._default_target_pos = self.data.mocap_pos[0].copy()
+        self._command_deadline: float | None = None
+        self._renderer: mujoco.Renderer | None = None
+
+        self._sensor_adr = {
+            name: int(self.model.sensor_adr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, name)])
+            for name in (
+                "rf_left",
+                "rf_center",
+                "rf_right",
+                "left_wheel_vel",
+                "right_wheel_vel",
+                "chassis_vel",
+                "chassis_gyro",
+            )
+        }
+        mujoco.mj_forward(self.model, self.data)
+
+    def close(self) -> None:
+        if self._renderer is not None:
+            self._renderer.close()
+            self._renderer = None
+
+    def set_wheels(self, left_rad_s: float, right_rad_s: float, duration: float = 1.0) -> dict:
+        _require_finite(left_rad_s=left_rad_s, right_rad_s=right_rad_s, duration=duration)
+        if duration <= 0.0:
+            raise ValueError("Thời gian thực thi 'duration' phải lớn hơn 0 giây.")
+
+        clamped_left = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, float(left_rad_s)))
+        clamped_right = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, float(right_rad_s)))
+        capped_duration = min(float(duration), MAX_COMMAND_DURATION)
+
+        self.data.ctrl[0] = clamped_left
+        self.data.ctrl[1] = clamped_right
+        self._command_deadline = float(self.data.time) + capped_duration
+        return {
+            "left_rad_s": round(clamped_left, 4),
+            "right_rad_s": round(clamped_right, 4),
+            "duration_s": round(capped_duration, 4),
+        }
+
+    def move(self, meters: float, speed_m_s: float = 0.25) -> dict:
+        left, right, duration = compute_move_command(meters=meters, speed_m_s=speed_m_s)
+        cmd = self.set_wheels(left, right, duration=duration)
+        cmd["requested_meters"] = round(float(meters), 4)
+        return cmd
+
+    def turn(self, degrees: float, angular_deg_s: float = 60.0) -> dict:
+        left, right, duration = compute_turn_command(degrees=degrees, angular_deg_s=angular_deg_s)
+        cmd = self.set_wheels(left, right, duration=duration)
+        cmd["requested_degrees"] = round(float(degrees), 4)
+        return cmd
+
+    def stop(self) -> dict:
+        self.data.ctrl[0] = 0.0
+        self.data.ctrl[1] = 0.0
+        self._command_deadline = None
+        return {"stopped": True, "sim_time": round(float(self.data.time), 4)}
+
+    def reset(self, target_xy: tuple[float, float] | list[float] | None = None) -> dict:
+        if target_xy is not None:
+            if len(target_xy) != 2:
+                raise ValueError("'target_xy' phải gồm đúng 2 tọa độ [x, y].")
+            tx, ty = float(target_xy[0]), float(target_xy[1])
+            _require_finite(target_x=tx, target_y=ty)
+            if abs(tx) > ARENA_SAFE_LIMIT or abs(ty) > ARENA_SAFE_LIMIT:
+                raise ValueError(
+                    f"Tọa độ mục tiêu ({tx}, {ty}) nằm ngoài vùng an toàn của sân [-{ARENA_SAFE_LIMIT}, {ARENA_SAFE_LIMIT}]m."
+                )
+        else:
+            tx, ty = float(self._default_target_pos[0]), float(self._default_target_pos[1])
+
+        mujoco.mj_resetData(self.model, self.data)
+        self.data.mocap_pos[0] = [tx, ty, float(self._default_target_pos[2])]
+        self._command_deadline = None
+        mujoco.mj_forward(self.model, self.data)
+        return self.get_status()
+
+    def step_once(self) -> None:
+        if self._command_deadline is not None and self.data.time >= self._command_deadline:
+            self.stop()
+        mujoco.mj_step(self.model, self.data)
+        if self._command_deadline is not None and self.data.time >= self._command_deadline:
+            self.stop()
+
+    def step_seconds(self, seconds: float) -> None:
+        _require_finite(seconds=seconds)
+        if seconds < 0.0:
+            raise ValueError("Số giây mô phỏng không được âm.")
+        steps = int(round(seconds / self.model.opt.timestep))
+        for _ in range(steps):
+            self.step_once()
+
+    def _read_rangefinder(self, sensor_name: str) -> tuple[float, bool]:
+        raw = float(self.data.sensordata[self._sensor_adr[sensor_name]])
+        if raw < 0.0 or raw >= RANGEFINDER_MAX - 1e-6:
+            return RANGEFINDER_MAX, False
+        return round(raw, 4), True
+
+    def get_status(self) -> dict:
+        mujoco.mj_forward(self.model, self.data)
+        rf_l, hit_l = self._read_rangefinder("rf_left")
+        rf_c, hit_c = self._read_rangefinder("rf_center")
+        rf_r, hit_r = self._read_rangefinder("rf_right")
+
+        left_vel = float(self.data.sensordata[self._sensor_adr["left_wheel_vel"]])
+        right_vel = float(self.data.sensordata[self._sensor_adr["right_wheel_vel"]])
+        forward_speed = float(self.data.sensordata[self._sensor_adr["chassis_vel"]])
+        yaw_rate = float(self.data.sensordata[self._sensor_adr["chassis_gyro"] + 2])
+
+        quat = self.data.qpos[3:7]
+        yaw_rad = float(
+            np.arctan2(
+                2.0 * (quat[0] * quat[3] + quat[1] * quat[2]),
+                1.0 - 2.0 * (quat[2] ** 2 + quat[3] ** 2),
+            )
+        )
+        remaining = (
+            max(0.0, float(self._command_deadline - self.data.time))
+            if self._command_deadline is not None
+            else 0.0
+        )
+
+        return {
+            "sim_time": round(float(self.data.time), 4),
+            "moving": remaining > 0.0,
+            "command_remaining_s": round(remaining, 4),
+            "sensors": {
+                "rangefinders_m": {"left": rf_l, "center": rf_c, "right": rf_r},
+                "rangefinder_hits": {"left": hit_l, "center": hit_c, "right": hit_r},
+                "wheel_vel_rad_s": {"left": round(left_vel, 4), "right": round(right_vel, 4)},
+                "forward_speed_m_s": round(forward_speed, 4),
+                "yaw_rate_rad_s": round(yaw_rate, 4),
+            },
+            "debug": {
+                "robot_xy": [round(float(self.data.qpos[0]), 4), round(float(self.data.qpos[1]), 4)],
+                "robot_yaw_deg": round(math.degrees(yaw_rad), 2),
+                "target_xy": [
+                    round(float(self.data.mocap_pos[0][0]), 4),
+                    round(float(self.data.mocap_pos[0][1]), 4),
+                ],
+            },
+        }
+
+    def capture_camera(self, camera_name: str = "front_cam", out_path: Path | str | None = None) -> dict:
+        cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
+        if cam_id < 0:
+            raise ValueError(f"Không tìm thấy camera '{camera_name}'. Chọn 'front_cam' hoặc 'overview_cam'.")
+
+        target_path = (
+            Path(out_path).resolve()
+            if out_path is not None
+            else (DEFAULT_CAPTURES_DIR / f"{camera_name}.png").resolve()
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        mujoco.mj_forward(self.model, self.data)
+        if self._renderer is None:
+            self._renderer = mujoco.Renderer(self.model, height=CAMERA_HEIGHT, width=CAMERA_WIDTH)
+        self._renderer.update_scene(self.data, camera=camera_name)
+        rgb = self._renderer.render()
+        Image.fromarray(rgb).save(target_path, format="PNG")
+
+        return {
+            "camera": camera_name,
+            "path": str(target_path),
+            "width": CAMERA_WIDTH,
+            "height": CAMERA_HEIGHT,
+        }
