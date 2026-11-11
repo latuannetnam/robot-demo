@@ -10,6 +10,12 @@ import urllib.error
 import urllib.request
 
 from robot_sim.skills import approach_target, closed_loop_turn, scan_for_target, wait_until_settled
+from robot_sim.telemetry import (
+    DEFAULT_STOP_FLAG_PATH,
+    DEFAULT_TELEMETRY_PATH,
+    record_telemetry,
+    stop_telemetry,
+)
 
 DEFAULT_URL = "http://127.0.0.1:8765"
 
@@ -196,6 +202,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_demo.add_argument("--steps", type=int, default=25, help="Số nhịp điều khiển tối đa (mặc định: 25)")
     p_demo.add_argument("--step-dt", type=float, default=0.20, help="Chu kỳ mỗi nhịp điều khiển (giây)")
 
+    p_tel = sub.add_parser("telemetry", help="Quản lý Hộp đen giám sát nền 10Hz (record / stop)")
+    tel_sub = p_tel.add_subparsers(dest="telemetry_action", required=True)
+
+    p_tel_rec = tel_sub.add_parser("record", help="Chạy nền thu thập telemetry 10Hz ra file JSON tóm tắt")
+    p_tel_rec.add_argument("--out", default=str(DEFAULT_TELEMETRY_PATH), help="Đường dẫn file JSON báo cáo")
+    p_tel_rec.add_argument("--stop-file", default=str(DEFAULT_STOP_FLAG_PATH), help="Đường dẫn file cờ dừng")
+    p_tel_rec.add_argument("--hz", type=float, default=10.0, help="Tần số lấy mẫu Hz (mặc định: 10)")
+    p_tel_rec.add_argument("--max-duration", type=float, default=300.0, help="Thời gian chạy tối đa (giây)")
+
+    p_tel_stop = tel_sub.add_parser("stop", help="Gửi cờ dừng Hộp đen và in ngay báo cáo JSON")
+    p_tel_stop.add_argument("--out", default=str(DEFAULT_TELEMETRY_PATH), help="Đường dẫn file JSON báo cáo")
+    p_tel_stop.add_argument("--stop-file", default=str(DEFAULT_STOP_FLAG_PATH), help="Đường dẫn file cờ dừng")
+    p_tel_stop.add_argument("--wait-timeout", type=float, default=3.0, help="Thời gian chờ Hộp đen ghi file (giây)")
+
     return parser
 
 
@@ -311,13 +331,28 @@ def main(argv: list[str] | None = None) -> int:
             if args.steps <= 0 or args.step_dt <= 0:
                 raise BridgeRequestError("'--steps' và '--step-dt' phải lớn hơn 0.")
             output = _run_reactive_demo(args.url, steps=args.steps, step_dt=args.step_dt)
+        elif args.command == "telemetry":
+            if args.telemetry_action == "record":
+                output = record_telemetry(
+                    args.url,
+                    out_path=args.out,
+                    stop_flag_path=args.stop_file,
+                    hz=args.hz,
+                    max_duration_s=args.max_duration,
+                )
+            else:
+                output = stop_telemetry(
+                    out_path=args.out,
+                    stop_flag_path=args.stop_file,
+                    wait_timeout_s=args.wait_timeout,
+                )
         else:  # pragma: no cover
             parser.print_help()
             return 2
 
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0
-    except (BridgeOfflineError, BridgeRequestError, ValueError) as exc:
+    except (BridgeOfflineError, BridgeRequestError, ValueError, RuntimeError) as exc:
         print(f"[Lỗi điều khiển robot] {exc}", file=sys.stderr)
         return 1
 
