@@ -1,0 +1,126 @@
+<mujoco model="arena_2wheel">
+  <!-- =====================================================================
+       MÔ HÌNH XE ROBOT 2 BÁNH VI SAI & SA BÀN THỬ NGHIỆM (MuJoCo MJCF)
+       Đơn vị chuẩn quốc tế (SI): mét (m), kilôgam (kg), giây (s), độ (degree)
+       Hệ trục của xe: +X hướng tới trước, +Y hướng sang trái, +Z hướng lên trên
+       ===================================================================== -->
+
+  <compiler angle="degree" coordinate="local"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
+
+  <visual>
+    <!-- Độ phân giải khung hình cho camera gắn trên xe (640x480) -->
+    <global offwidth="640" offheight="480"/>
+    <headlight ambient="0.45 0.45 0.45" diffuse="0.75 0.75 0.75" specular="0.2 0.2 0.2"/>
+  </visual>
+
+  <asset>
+    <!-- Họa tiết bàn cờ cho mặt sàn giúp dễ quan sát quãng đường di chuyển -->
+    <texture name="grid_tex" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.86 0.88 0.90" rgb2="0.72 0.75 0.79"/>
+    <material name="grid_mat" texture="grid_tex" texrepeat="8 8" reflectance="0.08"/>
+    <texture name="sky_tex" type="skybox" builtin="gradient" width="256" height="256"
+             rgb1="0.82 0.90 0.98" rgb2="0.96 0.98 1.0"/>
+  </asset>
+
+  <worldbody>
+    <!-- Ánh sáng chiếu từ trên cao xuống sa bàn -->
+    <light name="sun" pos="0 0 4.0" dir="0 0 -1" directional="true" castshadow="true"/>
+
+    <!-- Camera toàn cảnh nhìn bao quát cả sân 4m x 4m -->
+    <camera name="overview_cam" pos="-2.4 -2.4 2.6" xyaxes="0.707 -0.707 0 0.408 0.408 0.816" fovy="55"/>
+
+    <!-- Mặt sàn phẳng 4m x 4m (từ -2.0m đến +2.0m theo trục X và Y) -->
+    <geom name="floor" type="plane" size="2.0 2.0 0.05" material="grid_mat"
+          friction="0.9 0.005 0.0001"/>
+
+    <!-- Bốn bức tường thấp bao quanh sa bàn để xe không rơi ra ngoài -->
+    <geom name="wall_north" type="box" pos="0 2.025 0.125" size="2.05 0.025 0.125" rgba="0.35 0.38 0.42 1"/>
+    <geom name="wall_south" type="box" pos="0 -2.025 0.125" size="2.05 0.025 0.125" rgba="0.35 0.38 0.42 1"/>
+    <geom name="wall_east"  type="box" pos="2.025 0 0.125" size="0.025 2.00 0.125" rgba="0.35 0.38 0.42 1"/>
+    <geom name="wall_west"  type="box" pos="-2.025 0 0.125" size="0.025 2.00 0.125" rgba="0.35 0.38 0.42 1"/>
+
+    <!-- Các khối hộp chướng ngại vật màu sắc để thử nghiệm va chạm và né vật cản -->
+    <body name="obs_red" pos="0.70 0.95 0.12">
+      <geom name="obs_red_geom" type="box" size="0.12 0.12 0.12" rgba="0.90 0.25 0.20 1"/>
+    </body>
+    <body name="obs_blue" pos="0.85 -0.75 0.12">
+      <geom name="obs_blue_geom" type="box" size="0.12 0.12 0.12" rgba="0.20 0.48 0.92 1"/>
+    </body>
+    <body name="obs_yellow" pos="-0.85 0.75 0.12">
+      <geom name="obs_yellow_geom" type="cylinder" size="0.12 0.12" rgba="0.95 0.78 0.15 1"/>
+    </body>
+
+    <!-- Mục tiêu đích màu xanh lá sáng (mocap="true" cho phép kéo thả bằng chuột trên cửa sổ 3D) -->
+    <body name="target" mocap="true" pos="1.4 0.0 0.12">
+      <geom name="target_geom" type="cylinder" size="0.10 0.12" rgba="0.10 0.90 0.20 1"
+            contype="1" conaffinity="1"/>
+    </body>
+
+    <!-- ======================== XE ROBOT 2 BÁNH ======================== -->
+    <body name="robot" pos="0 0 0">
+      <!-- freejoint cho phép xe di chuyển và xoay tự do trong không gian 3D theo định luật vật lý -->
+      <freejoint name="robot_free"/>
+
+      <!-- Khung thân xe chính (24cm x 20cm x 6cm, đặt cách mặt sàn 3cm) -->
+      <geom name="chassis" type="box" pos="0 0 0.06" size="0.12 0.10 0.03" mass="1.2"
+            rgba="0.18 0.22 0.28 1"/>
+
+      <!-- Vạch mũi xe màu cam để người xem dễ phân biệt đầu xe trên cửa sổ 3D -->
+      <geom name="nose_marker" type="box" pos="0.10 0 0.092" size="0.02 0.06 0.004" mass="0.01"
+            rgba="1.0 0.45 0.10 1" contype="0" conaffinity="0"/>
+
+      <!-- Bánh cầu đỡ tự do phía sau (caster): ma sát rất nhỏ để đỡ thân xe nằm ngang -->
+      <geom name="caster" type="sphere" pos="-0.09 0 0.025" size="0.025" mass="0.1"
+            friction="0.01 0.001 0.0001" rgba="0.75 0.75 0.78 1"/>
+
+      <!-- Điểm đặt cảm biến vận tốc / con quay hồi chuyển (IMU) tại tâm thân xe -->
+      <site name="imu_site" pos="0 0 0.06" size="0.01"/>
+
+      <!-- Camera góc nhìn thứ nhất gắn ở mũi xe, hướng thẳng về phía trước (+X) -->
+      <camera name="front_cam" pos="0.12 0 0.09" xyaxes="0 -1 0 0 0 1" fovy="65"/>
+
+      <!-- Ba điểm phát tia cảm biến khoảng cách (trong MuJoCo, rangefinder bắn tia dọc trục +Z của site) -->
+      <site name="site_rf_center" pos="0.125 0.00 0.075" zaxis="1 0 0" size="0.008" rgba="1 0.2 0.2 1"/>
+      <site name="site_rf_left"   pos="0.125 0.06 0.075" zaxis="0.866025 0.5 0" size="0.008" rgba="1 0.2 0.2 1"/>
+      <site name="site_rf_right"  pos="0.125 -0.06 0.075" zaxis="0.866025 -0.5 0" size="0.008" rgba="1 0.2 0.2 1"/>
+
+      <!-- Bánh trái: gắn khớp bản lề xoay quanh trục Y -->
+      <body name="left_wheel" pos="0.03 0.115 0.05">
+        <joint name="left_wheel_joint" type="hinge" axis="0 1 0" damping="0.02"/>
+        <geom name="left_wheel_geom" type="cylinder" size="0.05 0.012" euler="90 0 0" mass="0.2"
+              friction="1.1 0.005 0.0001" rgba="0.12 0.12 0.14 1"/>
+      </body>
+
+      <!-- Bánh phải: gắn khớp bản lề xoay quanh trục Y -->
+      <body name="right_wheel" pos="0.03 -0.115 0.05">
+        <joint name="right_wheel_joint" type="hinge" axis="0 1 0" damping="0.02"/>
+        <geom name="right_wheel_geom" type="cylinder" size="0.05 0.012" euler="90 0 0" mass="0.2"
+              friction="1.1 0.005 0.0001" rgba="0.12 0.12 0.14 1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- Cơ cấu chấp hành (Động cơ điều khiển vận tốc góc rad/s cho hai bánh xe) -->
+  <actuator>
+    <velocity name="left_motor"  joint="left_wheel_joint"  kv="1.0" ctrlrange="-15 15" forcerange="-2.5 2.5"/>
+    <velocity name="right_motor" joint="right_wheel_joint" kv="1.0" ctrlrange="-15 15" forcerange="-2.5 2.5"/>
+  </actuator>
+
+  <!-- Hệ thống cảm biến gắn trên xe (tương ứng cảm biến trên robot phần cứng thật) -->
+  <sensor>
+    <!-- 3 tia đo khoảng cách phía trước (tối đa 3.0m; trả về -1 nếu không gặp vật cản) -->
+    <rangefinder name="rf_left"   site="site_rf_left"   cutoff="3.0"/>
+    <rangefinder name="rf_center" site="site_rf_center" cutoff="3.0"/>
+    <rangefinder name="rf_right"  site="site_rf_right"  cutoff="3.0"/>
+
+    <!-- Encoder đo tốc độ quay thực tế của hai bánh xe (rad/s) -->
+    <jointvel name="left_wheel_vel"  joint="left_wheel_joint"/>
+    <jointvel name="right_wheel_vel" joint="right_wheel_joint"/>
+
+    <!-- Cảm biến vận tốc dài và tốc độ xoay thân xe (IMU) -->
+    <velocimeter name="chassis_vel" site="imu_site"/>
+    <gyro name="chassis_gyro" site="imu_site"/>
+  </sensor>
+</mujoco>
