@@ -8,10 +8,14 @@ Dự án nhập môn thực hành mô phỏng vật lý **MuJoCo** dành cho ng�
 
 ## 1. Cấu trúc Dự án
 
-- `models/arena_2wheel.xml` — Mô hình vật lý MJCF (có chú thích tiếng Việt từng thẻ) của xe 2 bánh vi sai, bánh cầu đỡ tự do, camera mũi xe, 3 cảm biến khoảng cách, tường bao, hộp cản màu và trụ đích màu xanh lá.
-- `robot_sim/core.py` — Lõi điều khiển vật lý, chuẩn hóa cảm biến, cơ chế tự ngắt an toàn (watchdog) và kết xuất ảnh PNG từ camera.
+- `models/arena_2wheel.xml` — Mô hình vật lý MJCF (có chú thích tiếng Việt từng thẻ) của xe 2 bánh vi sai, cặp bánh cầu đỡ trước/sau chống chúi mũi, camera mũi xe, 3 cảm biến khoảng cách, IMU, tường bao, hộp cản màu và trụ đích màu xanh lá.
+- `robot_sim/core.py` — Lõi điều khiển vật lý, tích phân IMU Gyro 500 Hz, chuẩn hóa cảm biến, nạp nóng mô hình (`reload`) và phân tích `Edge Vision` trong RAM.
+- `robot_sim/skills.py` — Các kỹ năng phản xạ khép kín 20 Hz chuẩn Sim-to-Real (`scan`, `approach`, xoay khép kín theo Gyro, chờ tắt dao động sau lệnh).
+- `robot_sim/telemetry.py` — Hộp đen giám sát nền 10 Hz (0 token LLM) xuất báo cáo tóm tắt JSON `< 2 KB`.
+- `robot_sim/integrity.py` — Hàng rào chống gian lận khóa cứng kích thước sa bàn, vật cản và mục tiêu khi tự động R&D.
 - `sim_server.py` — Chương trình mở **cửa sổ 3D MuJoCo trực tiếp** kèm máy chủ HTTP cục bộ (`127.0.0.1:8765`).
-- `robot_ctl.py` — Công cụ dòng lệnh để bạn hoặc Antigravity đọc cảm biến, chụp ảnh camera và gửi lệnh lái xe.
+- `robot_ctl.py` — Công cụ dòng lệnh cho người dùng và Antigravity điều khiển, quét mục tiêu, thu thập hộp đen và nạp lại mô hình.
+- `.agents/skills/robot-multi-agent-rd/` & `AGENTS.md` — Quy trình Tổ đội Multi-Agent R&D 3 vai trò tích hợp sẵn cho Antigravity.
 
 ---
 
@@ -57,6 +61,15 @@ uv run python robot_ctl.py demo --steps 30
 
 # 8. Đặt lại vị trí ban đầu (có thể đổi tọa độ đích nằm trong [-1.7, 1.7])
 uv run python robot_ctl.py reset --target-x -1.2 --target-y 1.0 --vision
+
+# 9. Quét vòng tròn 20Hz tìm trụ xanh lá và tự căn giữa khung hình (chuẩn Sim-to-Real)
+.venv\Scripts\python.exe robot_ctl.py scan --max-degrees 360 --direction left
+
+# 10. Tiếp cận khép kín 20Hz bám tâm trụ xanh kết hợp né vật cản gần
+.venv\Scripts\python.exe robot_ctl.py approach --stop-distance 0.25
+
+# 11. Nạp nóng lại models/arena_2wheel.xml sau khi tinh chỉnh thiết kế thân xe (giữ nguyên đích hiện tại)
+.venv\Scripts\python.exe robot_ctl.py reload --vision
 ```
 
 ---
@@ -70,7 +83,19 @@ Khi `sim_server.py` đang mở cửa sổ 3D trên màn hình, bạn chỉ cần
 Antigravity sẽ đóng vai "bộ não" trên robot theo đúng vòng lặp **Cảm nhận → Suy luận → Hành động (Sense → Think → Act)** tối ưu tốc độ:
 1. Gọi `robot_ctl.py status --vision` để đọc khoảng cách + **bản tóm tắt thị giác tại biên (Edge Vision JSON < 300 bytes)** phản hồi tức thì mà không làm đầy bộ nhớ ảnh; chỉ khi gặp tình huống phức tạp mới chụp thêm `captures/front_cam.jpg` (`320x240` JPEG siêu nhẹ `~4 KB`).
 2. Nhận biết các khối hộp cản và vị trí trụ đích màu xanh lá trong khung hình.
-3. Gửi từng lệnh `turn` / `move` / `wheels` để bạn xem xe xoay sở trực tiếp trên màn hình 3D.
+3. Gửi từng lệnh `turn` / `move` / `wheels` (hoặc kỹ năng `scan` / `approach`) để bạn xem xe xoay sở trực tiếp trên màn hình 3D.
+
+### Chế độ Tổ đội Multi-Agent R&D Tự Cải Tiến (3 Vai Trò)
+
+> **Lưu ý:** Nếu bạn đang mở phiên `sim_server.py` từ bản cũ, hãy nhấn `Ctrl+C` rồi chạy lại `uv run python sim_server.py` **một lần duy nhất** để kích hoạt cảm biến `gyro_yaw_deg` 500 Hz và cổng nạp nóng `/reload`.
+
+Dự án tích hợp sẵn Workspace Skill `.agents/skills/robot-multi-agent-rd/SKILL.md` vận hành 3 vai trò độc lập để tối ưu tốc độ và bảo vệ Context Window của Antigravity:
+1. **Main Agent (Tổng công trình sư):** Đặt bài toán, bật **Hộp đen Python 10 Hz** (`telemetry record` tốn 0 token LLM) và chỉ đọc bảng điểm tóm tắt `~1 KB` (`telemetry stop`) sau mỗi vòng.
+2. **`robot-driver` (Subagent Lái mù Sim-to-Real):** Gọi trực tiếp `.venv\Scripts\python.exe robot_ctl.py` với các kỹ năng khép kín 20 Hz (`scan`, `approach`, `turn` Gyro), tuyệt đối cấm `--debug` và cấm đọc mã nguồn.
+3. **`robot-engineer` (Subagent Mổ băng & Tinh chỉnh):** Khi chuyến chạy chưa đạt chuẩn, tự đối chiếu Hộp đen với mã nguồn, tinh chỉnh thuật toán hoặc cơ khí thân xe trong `models/arena_2wheel.xml` (dưới sự giám sát chống gian lận của `robot_sim/integrity.py`), chạy `pytest` và gọi `reload` để kiểm chứng ở vòng tiếp theo (tối đa 3 vòng).
+
+Bạn có thể kích hoạt ngay bằng câu lệnh trong khung chat:
+> *"Hãy dùng cơ chế Multi-Agent R&D đặt đích ở `(-1.4, 1.15)` rồi chạy thử, giám sát qua Hộp đen và tự cải tiến nếu cần!"*
 
 ---
 
