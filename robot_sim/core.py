@@ -6,6 +6,8 @@ import mujoco
 import numpy as np
 from PIL import Image
 
+from robot_sim.integrity import verify_arena_integrity
+
 WHEEL_RADIUS = 0.05
 TRACK_WIDTH = 0.23
 MAX_WHEEL_RAD_S = 15.0
@@ -97,6 +99,45 @@ class RobotSimulation:
             self._renderer.close()
             self._renderer = None
             self._renderer_size = None
+
+    def reload(self, model_path: Path | str | None = None, preserve_target: bool = True) -> dict:
+        """Kiểm định tính toàn vẹn sa bàn và nạp lại mô hình vật lý an toàn (giữ nguyên mục tiêu nếu cần)."""
+        if not isinstance(preserve_target, bool):
+            raise ValueError("Tham số 'preserve_target' phải là kiểu boolean (true/false).")
+        resolved = (Path(model_path) if model_path is not None else self.model_path).resolve()
+        verify_arena_integrity(resolved)
+
+        prev_target_pos = self.data.mocap_pos[0].copy()
+        new_model = mujoco.MjModel.from_xml_path(str(resolved))
+        new_data = mujoco.MjData(new_model)
+        new_sensor_adr = {
+            name: int(new_model.sensor_adr[mujoco.mj_name2id(new_model, mujoco.mjtObj.mjOBJ_SENSOR, name)])
+            for name in (
+                "rf_left",
+                "rf_center",
+                "rf_right",
+                "left_wheel_vel",
+                "right_wheel_vel",
+                "chassis_vel",
+                "chassis_gyro",
+            )
+        }
+
+        self.close()
+        self.model_path = resolved
+        self.model = new_model
+        self.data = new_data
+        self._default_target_pos = self.data.mocap_pos[0].copy()
+        self._sensor_adr = new_sensor_adr
+        self._command_deadline = None
+        if preserve_target:
+            self.data.mocap_pos[0] = [
+                float(prev_target_pos[0]),
+                float(prev_target_pos[1]),
+                float(self._default_target_pos[2]),
+            ]
+        mujoco.mj_forward(self.model, self.data)
+        return self.get_status()
 
     def _get_renderer(self, width: int, height: int) -> mujoco.Renderer:
         if self._renderer is not None and self._renderer_size != (width, height):

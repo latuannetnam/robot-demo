@@ -9,6 +9,7 @@ from robot_sim.core import (
     compute_move_command,
     compute_turn_command,
 )
+from robot_sim.integrity import verify_arena_integrity
 
 __all__ = [
     "ARENA_SAFE_LIMIT",
@@ -20,4 +21,5 @@ __all__ = [
     "RobotSimulation",
     "compute_move_command",
     "compute_turn_command",
+    "verify_arena_integrity",
 ]

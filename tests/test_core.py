@@ -132,3 +132,20 @@ def test_analyze_vision_detects_green_target_and_colored_obstacles_in_ram():
         assert vis_empty["obstacles"] == []
     finally:
         sim.close()
+
+
+def test_braking_from_cruise_does_not_strike_floor_with_rangefinder():
+    sim = RobotSimulation()
+    try:
+        sim.reset(target_xy=(-1.4, 1.15))
+        cmd = sim.move(0.75, speed_m_s=0.35)
+        sim.step_seconds(cmd["duration_s"])
+        # Sample across the 150ms post-stop braking window where nose-dive previously hit 0.78m
+        min_center = 3.0
+        for _ in range(15):
+            sim.step_seconds(0.01)
+            min_center = min(min_center, sim.get_status()["sensors"]["rangefinders_m"]["center"])
+        assert min_center > 1.05
+    finally:
+        sim.close()
+
