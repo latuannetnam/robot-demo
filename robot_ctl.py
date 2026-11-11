@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 from pathlib import Path
 import sys
@@ -22,6 +23,10 @@ class BridgeRequestError(RuntimeError):
 
 
 def _call_bridge(base_url: str, path: str, method: str = "GET", payload: dict | None = None) -> dict:
+    if not isinstance(base_url, str) or not base_url.startswith(("http://", "https://")):
+        raise BridgeRequestError(
+            f"Địa chỉ --url không hợp lệ ('{base_url}'). Cần bắt đầu bằng http:// hoặc https:// (ví dụ: {DEFAULT_URL})."
+        )
     url = f"{base_url.rstrip('/')}{path}"
     raw_body = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -41,9 +46,9 @@ def _call_bridge(base_url: str, path: str, method: str = "GET", payload: dict | 
         except Exception:
             msg = str(exc)
         raise BridgeRequestError(msg) from exc
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError, OSError) as exc:
         raise BridgeOfflineError(
-            f"Không kết nối được tới mô phỏng tại {base_url}.\n"
+            f"Không kết nối được hoặc mất kết nối tới mô phỏng tại {base_url}.\n"
             "Hãy mở một cửa sổ terminal khác và khởi chạy cửa sổ 3D MuJoCo trước bằng lệnh:\n"
             "  uv run python sim_server.py"
         ) from exc
@@ -53,6 +58,17 @@ def _strip_debug(status_data: dict, keep_debug: bool) -> dict:
     if keep_debug:
         return status_data
     return {k: v for k, v in status_data.items() if k != "debug"}
+
+
+def _wait_for_completion(base_url: str, duration_s: float) -> dict:
+    """Chờ cho tới khi mô phỏng hoàn tất lệnh chuyển động (moving == False)."""
+    deadline = time.monotonic() + max(3.0, duration_s * 4.0)
+    time.sleep(min(max(0.0, duration_s * 0.5), 0.25))
+    status = _call_bridge(base_url, "/status", "GET")
+    while status.get("moving", False) and time.monotonic() < deadline:
+        time.sleep(0.05)
+        status = _call_bridge(base_url, "/status", "GET")
+    return _strip_debug(status, keep_debug=False)
 
 
 def _detect_green_target_in_image(image_path: str) -> tuple[bool, float, float]:
@@ -194,16 +210,14 @@ def main(argv: list[str] | None = None) -> int:
                 {"left": args.left, "right": args.right, "duration": args.duration},
             )
             if args.wait:
-                time.sleep(output["duration_s"] + 0.08)
-                output["after_status"] = _strip_debug(_call_bridge(args.url, "/status", "GET"), keep_debug=False)
+                output["after_status"] = _wait_for_completion(args.url, output["duration_s"])
         elif args.command == "move":
             meters = args.meters_opt if args.meters_opt is not None else args.meters
             if meters is None:
                 raise BridgeRequestError("Vui lòng truyền quãng đường (ví dụ: move 0.5 hoặc move -0.3).")
             output = _call_bridge(args.url, "/move", "POST", {"meters": meters, "speed": args.speed})
             if args.wait:
-                time.sleep(output["duration_s"] + 0.08)
-                output["after_status"] = _strip_debug(_call_bridge(args.url, "/status", "GET"), keep_debug=False)
+                output["after_status"] = _wait_for_completion(args.url, output["duration_s"])
         elif args.command == "turn":
             degrees = args.degrees_opt if args.degrees_opt is not None else args.degrees
             if degrees is None:
@@ -215,8 +229,7 @@ def main(argv: list[str] | None = None) -> int:
                 {"degrees": degrees, "angular_speed": args.speed},
             )
             if args.wait:
-                time.sleep(output["duration_s"] + 0.08)
-                output["after_status"] = _strip_debug(_call_bridge(args.url, "/status", "GET"), keep_debug=False)
+                output["after_status"] = _wait_for_completion(args.url, output["duration_s"])
         elif args.command == "stop":
             output = _call_bridge(args.url, "/stop", "POST", {})
         elif args.command == "reset":

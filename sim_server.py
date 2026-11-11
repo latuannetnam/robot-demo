@@ -151,16 +151,21 @@ class SimulationApp:
         return str(bound_host), int(bound_port)
 
     def run_loop(self, headless: bool = False, duration: float | None = None) -> None:
-        step_batch = 8
-        frame_dt = step_batch * float(self.sim.model.opt.timestep)
+        dt = float(self.sim.model.opt.timestep)
+        frame_dt = 8 * dt
         start_wall = time.perf_counter()
+        last_wall = start_wall
 
         if headless:
             while not self._closed:
-                if duration is not None and (time.perf_counter() - start_wall) >= duration:
+                now = time.perf_counter()
+                if duration is not None and (now - start_wall) >= duration:
                     break
+                elapsed = min(max(0.0, now - last_wall), 0.10)
+                last_wall = now
+                steps = max(1, int(round(elapsed / dt))) if elapsed > 0 else 8
                 t0 = time.perf_counter()
-                self.tick_headless(step_batch=step_batch)
+                self.tick_headless(step_batch=steps)
                 sleep_s = frame_dt - (time.perf_counter() - t0)
                 if sleep_s > 0:
                     time.sleep(sleep_s)
@@ -173,14 +178,19 @@ class SimulationApp:
             viewer.cam.distance = 3.1
             viewer.cam.elevation = -32.0
             viewer.cam.azimuth = 135.0
+            last_wall = time.perf_counter()
 
             while viewer.is_running() and not self._closed:
-                if duration is not None and (time.perf_counter() - start_wall) >= duration:
+                now = time.perf_counter()
+                if duration is not None and (now - start_wall) >= duration:
                     break
+                elapsed = min(max(0.0, now - last_wall), 0.10)
+                last_wall = now
+                steps = max(1, int(round(elapsed / dt))) if elapsed > 0 else 8
                 t0 = time.perf_counter()
                 with viewer.lock():
                     self.process_pending_commands()
-                    for _ in range(step_batch):
+                    for _ in range(steps):
                         self.sim.step_once()
                 viewer.sync()
                 sleep_s = frame_dt - (time.perf_counter() - t0)

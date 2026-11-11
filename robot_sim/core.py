@@ -129,10 +129,10 @@ class RobotSimulation:
 
     def reset(self, target_xy: tuple[float, float] | list[float] | None = None) -> dict:
         if target_xy is not None:
-            if len(target_xy) != 2:
-                raise ValueError("'target_xy' phải gồm đúng 2 tọa độ [x, y].")
+            if not isinstance(target_xy, (list, tuple)) or len(target_xy) != 2:
+                raise ValueError("'target_xy' phải là danh sách gồm đúng 2 số [x, y].")
+            _require_finite(target_x=target_xy[0], target_y=target_xy[1])
             tx, ty = float(target_xy[0]), float(target_xy[1])
-            _require_finite(target_x=tx, target_y=ty)
             if abs(tx) > ARENA_SAFE_LIMIT or abs(ty) > ARENA_SAFE_LIMIT:
                 raise ValueError(
                     f"Tọa độ mục tiêu ({tx}, {ty}) nằm ngoài vùng an toàn của sân [-{ARENA_SAFE_LIMIT}, {ARENA_SAFE_LIMIT}]m."
@@ -213,15 +213,21 @@ class RobotSimulation:
         }
 
     def capture_camera(self, camera_name: str = "front_cam", out_path: Path | str | None = None) -> dict:
+        if not isinstance(camera_name, str) or not camera_name.strip():
+            raise ValueError("Tên camera phải là chuỗi hợp lệ ('front_cam' hoặc 'overview_cam').")
         cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
         if cam_id < 0:
             raise ValueError(f"Không tìm thấy camera '{camera_name}'. Chọn 'front_cam' hoặc 'overview_cam'.")
 
-        target_path = (
-            Path(out_path).resolve()
-            if out_path is not None
-            else (DEFAULT_CAPTURES_DIR / f"{camera_name}.png").resolve()
-        )
+        if out_path is not None:
+            if not isinstance(out_path, (str, Path)) or (isinstance(out_path, str) and not out_path.strip()):
+                raise ValueError("Đường dẫn lưu ảnh 'path' phải là chuỗi tên file PNG hợp lệ.")
+            target_path = Path(out_path).resolve()
+        else:
+            target_path = (DEFAULT_CAPTURES_DIR / f"{camera_name}.png").resolve()
+
+        if target_path.exists() and target_path.is_dir():
+            raise ValueError(f"Đường dẫn '{target_path}' là thư mục; vui lòng truyền đường dẫn tới file .png.")
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         mujoco.mj_forward(self.model, self.data)

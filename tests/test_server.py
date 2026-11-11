@@ -59,3 +59,35 @@ def test_http_bridge_drives_captures_and_survives_bad_requests(tmp_path: Path):
     assert results["good_cam"][0] == 200 and Path(results["good_cam"][1]["data"]["path"]).is_file()
     assert results["status"][0] == 200
     assert results["status"][1]["data"]["debug"]["robot_xy"][0] > 0.03
+
+
+def test_reset_and_camera_reject_malformed_types_with_400(tmp_path: Path):
+    app = SimulationApp()
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    base = f"http://{host}:{port}"
+    stop_evt = threading.Event()
+    results: dict = {}
+
+    def client_worker():
+        try:
+            results["bool_xy"] = _request(f"{base}/reset", "POST", {"target_xy": [True, False]})
+            results["str_xy"] = _request(f"{base}/reset", "POST", {"target_xy": "10"})
+            results["null_cam"] = _request(f"{base}/camera", "POST", {"camera": None})
+            results["dir_path"] = _request(f"{base}/camera", "POST", {"camera": "front_cam", "path": str(tmp_path)})
+            results["empty_path"] = _request(f"{base}/camera", "POST", {"camera": "front_cam", "path": "   "})
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=client_worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=5)
+            time.sleep(0.005)
+        t.join(timeout=5.0)
+    finally:
+        app.shutdown()
+
+    for key in ("bool_xy", "str_xy", "null_cam", "dir_path", "empty_path"):
+        assert results[key][0] == 400, f"{key} returned {results[key]}"
+        assert results[key][1]["ok"] is False
