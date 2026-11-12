@@ -245,3 +245,46 @@ def test_reload_discovers_extra_rangefinder_and_respects_per_sensor_cutoff(tmp_p
         sim.close()
 
 
+def test_reload_cross_arena_explicit_preserve_target_rejects_wall_overlapping_prev_target_atomically(tmp_path: Path):
+    sim = RobotSimulation()
+    try:
+        # (1.5, 1.0) is open floor on 2wheel, but sits directly inside maze_w02 on maze_a
+        sim.reset(target_xy=(1.5, 1.0))
+        sim.move(0.20, speed_m_s=0.25)
+        sim.step_seconds(0.20)
+        before = sim.get_status()
+        assert before["debug"]["arena"] == "2wheel"
+        assert before["debug"]["target_xy"] == pytest.approx([1.5, 1.0], abs=1e-3)
+
+        with pytest.raises(ValueError):
+            sim.reload(model_path="maze_a", preserve_target=True)
+
+        after = sim.get_status()
+        assert after["debug"]["arena"] == "2wheel"
+        assert after["debug"]["model"] == "arena_2wheel.xml"
+        assert after["debug"]["target_xy"] == pytest.approx([1.5, 1.0], abs=1e-3)
+        assert after["sim_time"] == before["sim_time"]
+        assert after["debug"]["robot_xy"] == before["debug"]["robot_xy"]
+
+        # Duplicate stripped rangefinder keys (e.g. 'rf_center' and 'center') must also be rejected atomically
+        arena_dup = tmp_path / "arena_2wheel.xml"
+        robot_dup = tmp_path / "robot_2wheel.xml"
+        shutil.copyfile(MODELS_DIR / "arena_2wheel.xml", arena_dup)
+        robot_xml = (MODELS_DIR / "robot_2wheel.xml").read_text(encoding="utf-8")
+        robot_dup.write_text(
+            robot_xml.replace(
+                '<rangefinder name="rf_center" site="site_rf_center" cutoff="3.0"/>',
+                '<rangefinder name="rf_center" site="site_rf_center" cutoff="3.0"/>\n'
+                '    <rangefinder name="center" site="site_rf_center" cutoff="3.0"/>',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError):
+            sim.reload(model_path=arena_dup)
+        assert sim.get_status()["debug"]["target_xy"] == pytest.approx([1.5, 1.0], abs=1e-3)
+    finally:
+        sim.close()
+
+
+

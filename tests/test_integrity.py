@@ -182,3 +182,82 @@ def test_verify_arena_integrity_supports_standalone_inline_robot_and_rejects_unk
     )
     with pytest.raises(ValueError):
         verify_arena_integrity(unknown_model)
+
+
+def test_verify_arena_integrity_rejects_unclassed_default_collision_disable_and_rotated_camera_periscope(
+    tmp_path: Path,
+):
+    # Case 1: Unclassed <default> in robot_2wheel.xml disabling geom collisions globally
+    default_dir = tmp_path / "unclassed_default"
+    default_dir.mkdir(parents=True, exist_ok=True)
+    bad_arena_default, bad_robot_default = _copy_arena_bundle(
+        default_dir, arena_filename="arena_maze_a.xml", dst_name="arena_maze_a.xml"
+    )
+    robot_xml = bad_robot_default.read_text(encoding="utf-8")
+    bad_robot_default.write_text(
+        robot_xml.replace(
+            "<mujocoinclude>",
+            '<mujocoinclude>\n  <default><geom contype="0" conaffinity="0"/></default>',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        verify_arena_integrity(bad_arena_default)
+
+    # Case 1b: Arena-root <default> disabling collision or alpha on non-robot compiled geoms
+    root_def_dir = tmp_path / "root_default_collision"
+    root_def_dir.mkdir(parents=True, exist_ok=True)
+    bad_arena_root_def, _ = _copy_arena_bundle(
+        root_def_dir, arena_filename="arena_maze_a.xml", dst_name="arena_maze_a.xml"
+    )
+    arena_xml = bad_arena_root_def.read_text(encoding="utf-8")
+    bad_arena_root_def.write_text(
+        arena_xml.replace(
+            "<worldbody>",
+            '<default><geom contype="0" conaffinity="0"/></default>\n  <worldbody>',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        verify_arena_integrity(bad_arena_root_def)
+
+    # Case 2: Rotated child body lifts front_cam to z=0.49m while unrotated XML pos sum (0.24, 0, 0.25) stays inside bounds
+    cam_dir = tmp_path / "rotated_cam"
+    cam_dir.mkdir(parents=True, exist_ok=True)
+    bad_arena_cam, bad_robot_cam = _copy_arena_bundle(
+        cam_dir, arena_filename="arena_maze_a.xml", dst_name="arena_maze_a.xml"
+    )
+    bad_robot_cam.write_text(
+        robot_xml.replace(
+            '<camera name="front_cam" pos="0.12 0 0.09" xyaxes="0 -1 0 0 0 1" fovy="65"/>',
+            '<body name="cam_boom" pos="0 0 0.25" euler="0 -90 0">'
+            '<camera name="front_cam" pos="0.24 0 0" xyaxes="0 -1 0 0 0 1" fovy="65"/>'
+            "</body>",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        verify_arena_integrity(bad_arena_cam)
+
+    # Case 3: Rotated child body lifts a sensor site to z=0.49m while unrotated XML pos sum stays inside bounds
+    site_dir = tmp_path / "rotated_site"
+    site_dir.mkdir(parents=True, exist_ok=True)
+    bad_arena_site, bad_robot_site = _copy_arena_bundle(
+        site_dir, arena_filename="arena_maze_a.xml", dst_name="arena_maze_a.xml"
+    )
+    bad_robot_site.write_text(
+        robot_xml.replace(
+            '<site name="site_rf_center" pos="0.125 0.00 0.075" zaxis="1 0 0" size="0.008" rgba="1 0.2 0.2 1"/>',
+            '<body name="site_boom" pos="0 0 0.25" euler="0 -90 0">'
+            '<site name="site_rf_center" pos="0.24 0 0" zaxis="1 0 0" size="0.008" rgba="1 0.2 0.2 1"/>'
+            "</body>",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        verify_arena_integrity(bad_arena_site)
+

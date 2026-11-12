@@ -164,9 +164,20 @@ def _check_robot_compiled_geom_extents(mj_model: mujoco.MjModel, robot_body_id: 
     robot_rmat = mj_data.xmat[robot_body_id].reshape(3, 3)
 
     for gid in range(mj_model.ngeom):
-        if int(mj_model.geom_bodyid[gid]) not in robot_bodies:
-            continue
         gname = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_GEOM, gid) or f"geom#{gid}"
+        if int(mj_model.geom_bodyid[gid]) not in robot_bodies:
+            if (
+                int(mj_model.geom_contype[gid]) == 0
+                or int(mj_model.geom_conaffinity[gid]) == 0
+                or float(mj_model.geom_rgba[gid, 3]) < 0.99
+            ):
+                raise ValueError(
+                    f"Vi phạm toàn vẹn sa bàn: phần tử địa hình '{gname}' bị tắt va chạm hoặc làm mờ "
+                    f"(contype={int(mj_model.geom_contype[gid])}, "
+                    f"conaffinity={int(mj_model.geom_conaffinity[gid])}, "
+                    f"alpha={float(mj_model.geom_rgba[gid, 3]):.3f})."
+                )
+            continue
         rel_pos = robot_rmat.T @ (mj_data.geom_xpos[gid] - robot_origin)
         rel_rmat = robot_rmat.T @ mj_data.geom_xmat[gid].reshape(3, 3)
         hx, hy, hz = _geom_half_extents(mj_model, gid, rel_rmat)
@@ -181,6 +192,32 @@ def _check_robot_compiled_geom_extents(mj_model: mujoco.MjModel, robot_body_id: 
                 f"Vi phạm giới hạn cơ khí Sim-to-Real: kích thước hình học '{gname}' "
                 f"(tâm cục bộ={(round(dx, 4), round(dy, 4), round(dz, 4))}, "
                 f"bán kính mở rộng={(round(hx, 4), round(hy, 4), round(hz, 4))}) "
+                f"vượt ngoài khung robot cho phép (|x|<=0.25, |y|<=0.20, 0<=z<=0.30m)."
+            )
+
+    for cid in range(mj_model.ncam):
+        if int(mj_model.cam_bodyid[cid]) not in robot_bodies:
+            continue
+        cname = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_CAMERA, cid) or f"cam#{cid}"
+        rel_pos = robot_rmat.T @ (mj_data.cam_xpos[cid] - robot_origin)
+        dx, dy, dz = float(rel_pos[0]), float(rel_pos[1]), float(rel_pos[2])
+        if abs(dx) > 0.25 + 1e-4 or abs(dy) > 0.20 + 1e-4 or dz < -0.002 or dz > 0.30 + 1e-4:
+            raise ValueError(
+                f"Vi phạm giới hạn cơ khí Sim-to-Real: camera '{cname}' "
+                f"(tọa độ biên dịch cục bộ={(round(dx, 4), round(dy, 4), round(dz, 4))}) "
+                f"vượt ngoài khung robot cho phép (|x|<=0.25, |y|<=0.20, 0<=z<=0.30m)."
+            )
+
+    for sid in range(mj_model.nsite):
+        if int(mj_model.site_bodyid[sid]) not in robot_bodies:
+            continue
+        sname = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_SITE, sid) or f"site#{sid}"
+        rel_pos = robot_rmat.T @ (mj_data.site_xpos[sid] - robot_origin)
+        dx, dy, dz = float(rel_pos[0]), float(rel_pos[1]), float(rel_pos[2])
+        if abs(dx) > 0.25 + 1e-4 or abs(dy) > 0.20 + 1e-4 or dz < -0.002 or dz > 0.30 + 1e-4:
+            raise ValueError(
+                f"Vi phạm giới hạn cơ khí Sim-to-Real: site '{sname}' "
+                f"(tọa độ biên dịch cục bộ={(round(dx, 4), round(dy, 4), round(dz, 4))}) "
                 f"vượt ngoài khung robot cho phép (|x|<=0.25, |y|<=0.20, 0<=z<=0.30m)."
             )
 
@@ -222,6 +259,16 @@ def _extract_included_robot_body(resolved_arena: Path, inc_elem: ET.Element) -> 
     for child in inc_root:
         if child.tag not in _ALLOWED_INCLUDE_ROOT_TAGS:
             raise ValueError(f"Thẻ '<{child.tag}>' không được phép trong '{inc_file}'.")
+        if child.tag == "default" and not (child.get("class") or "").strip():
+            raise ValueError(
+                f"Thẻ <default> trong '{inc_file}' bắt buộc phải khai báo thuộc tính 'class' không rỗng."
+            )
+    for def_elem in inc_root.findall(".//default"):
+        cls_name = (def_elem.get("class") or "").strip()
+        if not cls_name or cls_name == "main":
+            raise ValueError(
+                f"Thẻ <default> trong '{inc_file}' bắt buộc phải khai báo 'class' riêng biệt (khác rỗng và khác 'main')."
+            )
     if len(inc_worldbodies) != 1:
         raise ValueError(f"File '{inc_file}' phải chứa đúng 1 khối <worldbody>.")
 

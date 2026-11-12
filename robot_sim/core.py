@@ -80,6 +80,8 @@ def _discover_sensors(model: mujoco.MjModel) -> tuple[dict[str, int], dict[str, 
         if int(model.sensor_type[sid]) == rf_type:
             sname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, sid) or f"rf_{sid}"
             key = sname[3:] if sname.startswith("rf_") else sname
+            if key in rangefinders:
+                raise ValueError(f"Trùng khóa cảm biến khoảng cách '{key}'.")
             raw_cutoff = float(model.sensor_cutoff[sid])
             cutoff = raw_cutoff if raw_cutoff > 0.0 else RANGEFINDER_MAX
             rangefinders[key] = (int(model.sensor_adr[sid]), cutoff)
@@ -145,12 +147,16 @@ class RobotSimulation:
 
         new_model = mujoco.MjModel.from_xml_path(str(resolved))
         new_sensor_adr, new_rangefinders = _discover_sensors(new_model)
+        keep_prev = (resolved == self.model_path) if preserve_target is None else preserve_target
+        prev_target_pos = self.data.mocap_pos[0].copy()
         validated_target: tuple[float, float] | None = None
         if target_xy is not None:
             validated_target = self.validate_target_xy(target_xy, model=new_model)
-
-        keep_prev = (resolved == self.model_path) if preserve_target is None else preserve_target
-        prev_target_pos = self.data.mocap_pos[0].copy()
+        elif keep_prev and resolved != self.model_path:
+            validated_target = self.validate_target_xy(
+                (float(prev_target_pos[0]), float(prev_target_pos[1])),
+                model=new_model,
+            )
 
         new_data = mujoco.MjData(new_model)
         new_default_target_pos = new_data.mocap_pos[0].copy()
