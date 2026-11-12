@@ -57,6 +57,7 @@ def record_telemetry(
 
     first_sim_t: float | None = None
     last_sim_t: float | None = None
+    arena_id: str | None = None
     start_xy: list[float] | None = None
     prev_xy: list[float] | None = None
     end_xy: list[float] | None = None
@@ -71,9 +72,11 @@ def record_telemetry(
 
     prev_moving = False
     prev_rf_center: float | None = None
+    prev_yaw_deg: float | None = None
     post_stop_window = 0
     rf_at_stop_onset: float | None = None
     xy_at_stop_onset: list[float] | None = None
+    yaw_at_stop_onset: float | None = None
 
     final_rf_center: float | None = None
     final_target_visible = False
@@ -100,9 +103,7 @@ def record_telemetry(
                 moving = bool(st.get("moving", False))
                 sensors = st.get("sensors", {})
                 rf = sensors.get("rangefinders_m", {})
-                rf_l = float(rf.get("left", 3.0))
                 rf_c = float(rf.get("center", 3.0))
-                rf_r = float(rf.get("right", 3.0))
                 fwd_spd = abs(float(sensors.get("forward_speed_m_s", 0.0)))
                 yaw_spd = abs(float(sensors.get("yaw_rate_rad_s", 0.0)))
 
@@ -110,6 +111,8 @@ def record_telemetry(
                     active_samples += 1
 
                 dbg = st.get("debug", {})
+                if isinstance(dbg.get("arena"), str) and dbg["arena"]:
+                    arena_id = dbg["arena"]
                 curr_xy = dbg.get("robot_xy")
                 if isinstance(curr_xy, list) and len(curr_xy) == 2:
                     if start_xy is None:
@@ -139,7 +142,7 @@ def record_telemetry(
                 final_target_visible = t_vis
                 final_target_offset_x = round(t_off, 3) if t_off is not None else None
 
-                cur_min_rf = min(rf_l, rf_c, rf_r)
+                cur_min_rf = min((float(v) for v in rf.values()), default=3.0)
                 min_rf_m = min(min_rf_m, cur_min_rf)
                 facing_target_closely = t_vis and t_off is not None and abs(t_off) < 0.28
                 if cur_min_rf < 0.12 and not facing_target_closely:
@@ -152,10 +155,21 @@ def record_telemetry(
                     post_stop_window = 3
                     rf_at_stop_onset = prev_rf_center
                     xy_at_stop_onset = prev_xy
+                    yaw_at_stop_onset = prev_yaw_deg
 
-                if post_stop_window > 0 and rf_at_stop_onset is not None and xy_at_stop_onset is not None and end_xy is not None:
+                if (
+                    post_stop_window > 0
+                    and rf_at_stop_onset is not None
+                    and xy_at_stop_onset is not None
+                    and end_xy is not None
+                ):
                     drift = math.hypot(end_xy[0] - xy_at_stop_onset[0], end_xy[1] - xy_at_stop_onset[1])
-                    if drift < 0.06:
+                    yaw_drift = (
+                        abs(((end_yaw_deg - yaw_at_stop_onset + 180.0) % 360.0) - 180.0)
+                        if (end_yaw_deg is not None and yaw_at_stop_onset is not None)
+                        else 0.0
+                    )
+                    if drift < 0.06 and yaw_drift < 5.0:
                         drop = rf_at_stop_onset - rf_c
                         if drop > braking_rf_drop_m:
                             braking_rf_drop_m = drop
@@ -163,6 +177,7 @@ def record_telemetry(
 
                 prev_moving = moving
                 prev_rf_center = rf_c
+                prev_yaw_deg = end_yaw_deg
             except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError, OSError, ValueError) as exc:
                 error_count += 1
                 last_error = str(exc)
@@ -204,6 +219,7 @@ def record_telemetry(
 
     summary = {
         "started_at": started_iso,
+        "arena": arena_id,
         "wall_time_s": round(wall_time_s, 2),
         "sim_time_s": round(sim_time_s, 2),
         "realtime_ratio": round(sim_time_s / wall_time_s, 3) if sim_time_s > 0 else 0.0,

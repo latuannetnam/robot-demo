@@ -1,6 +1,8 @@
 from pathlib import Path
 import math
+import shutil
 import pytest
+from robot_sim.arenas import MODELS_DIR
 from robot_sim.core import RobotSimulation, RANGEFINDER_MAX, MAX_WHEEL_RAD_S
 
 
@@ -148,4 +150,98 @@ def test_braking_from_cruise_does_not_strike_floor_with_rangefinder():
         assert min_center > 1.05
     finally:
         sim.close()
+
+
+def test_reload_switches_arena_spawn_and_resets_target_unless_same_arena():
+    sim = RobotSimulation()
+    try:
+        st0 = sim.get_status()
+        assert "arena" not in st0 and "model" not in st0
+        assert st0["debug"]["arena"] == "2wheel"
+        assert st0["debug"]["model"] == "arena_2wheel.xml"
+
+        sim.reset(target_xy=(-1.2, 0.9))
+        st_same = sim.reload()
+        assert st_same["debug"]["arena"] == "2wheel"
+        assert st_same["debug"]["robot_xy"] == pytest.approx([0.0, 0.0], abs=1e-3)
+        assert st_same["debug"]["target_xy"] == pytest.approx([-1.2, 0.9], abs=1e-3)
+
+        st_maze = sim.reload(model_path="maze_a")
+        assert st_maze["debug"]["arena"] == "maze_a"
+        assert st_maze["debug"]["model"] == "arena_maze_a.xml"
+        assert st_maze["debug"]["robot_xy"] == pytest.approx([-1.5, -1.5], abs=1e-3)
+        assert st_maze["debug"]["target_xy"] == pytest.approx([1.5, 1.5], abs=1e-3)
+
+        st_back = sim.reload(model_path="2wheel")
+        assert st_back["debug"]["arena"] == "2wheel"
+        assert st_back["debug"]["model"] == "arena_2wheel.xml"
+        assert st_back["debug"]["robot_xy"] == pytest.approx([0.0, 0.0], abs=1e-3)
+        assert st_back["debug"]["target_xy"] == pytest.approx([1.4, 0.0], abs=1e-3)
+    finally:
+        sim.close()
+
+
+def test_validate_target_xy_rejects_maze_wall_and_obstacle_center_overlap_while_preserving_near_obstacle_cli_coord():
+    sim = RobotSimulation()
+    try:
+        # On 2wheel: legacy CLI coord (1.0, -0.8) near obs_blue remains valid, while obstacle centers fail
+        assert sim.validate_target_xy((1.0, -0.8)) == pytest.approx((1.0, -0.8))
+        with pytest.raises(ValueError):
+            sim.validate_target_xy((0.85, -0.75))  # inside obs_blue box
+        with pytest.raises(ValueError):
+            sim.validate_target_xy((-0.85, 0.75))  # inside obs_yellow cylinder
+
+        # Atomic reload failure: switching to maze_a with invalid target_xy on maze_w02 leaves 2wheel state untouched
+        sim.reset(target_xy=(-1.1, 0.8))
+        sim.move(0.20, speed_m_s=0.25)
+        sim.step_seconds(0.30)
+        before = sim.get_status()
+        with pytest.raises(ValueError):
+            sim.reload(model_path="maze_a", target_xy=(1.5, 1.0))
+        after = sim.get_status()
+        assert after["debug"]["arena"] == "2wheel"
+        assert after["debug"]["target_xy"] == pytest.approx([-1.1, 0.8], abs=1e-3)
+        assert after["sim_time"] == before["sim_time"]
+        assert after["debug"]["robot_xy"] == before["debug"]["robot_xy"]
+
+        # Once on maze_a, validate_target_xy rejects center and r=0.10m cylinder overlap with maze_w02
+        sim.reload(model_path="maze_a")
+        with pytest.raises(ValueError):
+            sim.validate_target_xy((1.5, 1.0))
+        with pytest.raises(ValueError):
+            sim.validate_target_xy((1.5, 1.08))
+    finally:
+        sim.close()
+
+
+def test_reload_discovers_extra_rangefinder_and_respects_per_sensor_cutoff(tmp_path: Path):
+    arena_copy = tmp_path / "arena_2wheel.xml"
+    robot_copy = tmp_path / "robot_2wheel.xml"
+    shutil.copyfile(MODELS_DIR / "arena_2wheel.xml", arena_copy)
+    robot_xml = (MODELS_DIR / "robot_2wheel.xml").read_text(encoding="utf-8")
+    robot_xml = robot_xml.replace(
+        '<site name="site_rf_right"',
+        '<site name="site_rf_side_left" pos="0.10 0.09 0.075" zaxis="0 1 0" size="0.008"/>\n      <site name="site_rf_right"',
+        1,
+    ).replace(
+        '<rangefinder name="rf_right"  site="site_rf_right"  cutoff="3.0"/>',
+        '<rangefinder name="rf_right"  site="site_rf_right"  cutoff="3.0"/>\n    <rangefinder name="rf_side_left" site="site_rf_side_left" cutoff="1.5"/>',
+        1,
+    )
+    robot_copy.write_text(robot_xml, encoding="utf-8")
+
+    sim = RobotSimulation()
+    try:
+        st = sim.reload(model_path=arena_copy)
+        assert st["sensors"]["rangefinders_m"]["side_left"] == 1.5
+        assert st["sensors"]["rangefinder_hits"]["side_left"] is False
+
+        # Move closer to wall_north (y=2.0 inner face) so distance (~0.91m) is within the 1.5m cutoff
+        sim.data.qpos[1] = 1.0
+        st_hit = sim.get_status()
+        assert st_hit["sensors"]["rangefinder_hits"]["side_left"] is True
+        assert 0.85 < st_hit["sensors"]["rangefinders_m"]["side_left"] < 0.96
+    finally:
+        sim.close()
+
 

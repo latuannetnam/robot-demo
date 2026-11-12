@@ -6,6 +6,7 @@ import mujoco
 import numpy as np
 from PIL import Image
 
+from robot_sim.arenas import identify_arena_id, resolve_arena_model
 from robot_sim.integrity import verify_arena_integrity
 
 WHEEL_RADIUS = 0.05
@@ -65,15 +66,54 @@ def compute_turn_command(degrees: float, angular_deg_s: float = 60.0) -> tuple[f
     return omega, -omega, duration
 
 
+def _discover_sensors(model: mujoco.MjModel) -> tuple[dict[str, int], dict[str, tuple[int, float]]]:
+    fixed_adr: dict[str, int] = {}
+    for name in ("left_wheel_vel", "right_wheel_vel", "chassis_vel", "chassis_gyro"):
+        sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, name)
+        if sid < 0:
+            raise ValueError(f"Mô hình thiếu cảm biến bắt buộc '{name}'.")
+        fixed_adr[name] = int(model.sensor_adr[sid])
+
+    rangefinders: dict[str, tuple[int, float]] = {}
+    rf_type = int(mujoco.mjtSensor.mjSENS_RANGEFINDER)
+    for sid in range(model.nsensor):
+        if int(model.sensor_type[sid]) == rf_type:
+            sname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, sid) or f"rf_{sid}"
+            key = sname[3:] if sname.startswith("rf_") else sname
+            raw_cutoff = float(model.sensor_cutoff[sid])
+            cutoff = raw_cutoff if raw_cutoff > 0.0 else RANGEFINDER_MAX
+            rangefinders[key] = (int(model.sensor_adr[sid]), cutoff)
+
+    return fixed_adr, rangefinders
+
+
+def _read_spawn_pose(model: mujoco.MjModel) -> tuple[float, float, float]:
+    site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "robot_spawn")
+    if site_id < 0:
+        return 0.0, 0.0, 0.0
+    pos = model.site_pos[site_id]
+    quat = model.site_quat[site_id]
+    w, x, y, z = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+    yaw_rad = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return float(pos[0]), float(pos[1]), yaw_rad
+
+
+def _apply_spawn_pose(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+    sx, sy, syaw = _read_spawn_pose(model)
+    data.qpos[0] = sx
+    data.qpos[1] = sy
+    data.qpos[3:7] = [math.cos(syaw / 2.0), 0.0, 0.0, math.sin(syaw / 2.0)]
+
+
 class RobotSimulation:
     """Lõi mô phỏng vật lý MuJoCo cho xe robot 2 bánh vi sai."""
 
     def __init__(self, model_path: Path | str | None = None) -> None:
-        resolved = Path(model_path) if model_path is not None else DEFAULT_MODEL_PATH
-        self.model_path = resolved.resolve()
+        self.model_path = resolve_arena_model(model_path)
         self.model = mujoco.MjModel.from_xml_path(str(self.model_path))
         self.data = mujoco.MjData(self.model)
         self._default_target_pos = self.data.mocap_pos[0].copy()
+        _apply_spawn_pose(self.model, self.data)
         self._command_deadline: float | None = None
         self._gyro_yaw_rad: float = 0.0
         self._odom_dist_m: float = 0.0
@@ -82,18 +122,7 @@ class RobotSimulation:
         self._clean_vis_opt = mujoco.MjvOption()
         self._clean_vis_opt.flags[mujoco.mjtVisFlag.mjVIS_RANGEFINDER] = 0
 
-        self._sensor_adr = {
-            name: int(self.model.sensor_adr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, name)])
-            for name in (
-                "rf_left",
-                "rf_center",
-                "rf_right",
-                "left_wheel_vel",
-                "right_wheel_vel",
-                "chassis_vel",
-                "chassis_gyro",
-            )
-        }
+        self._sensor_adr, self._rangefinders = _discover_sensors(self.model)
         mujoco.mj_forward(self.model, self.data)
 
     def close(self) -> None:
@@ -102,45 +131,56 @@ class RobotSimulation:
             self._renderer = None
             self._renderer_size = None
 
-    def reload(self, model_path: Path | str | None = None, preserve_target: bool = True) -> dict:
-        """Kiểm định tính toàn vẹn sa bàn và nạp lại mô hình vật lý an toàn (giữ nguyên mục tiêu nếu cần)."""
-        if not isinstance(preserve_target, bool):
+    def reload(
+        self,
+        model_path: Path | str | None = None,
+        preserve_target: bool | None = None,
+        target_xy: tuple[float, float] | list[float] | None = None,
+    ) -> dict:
+        """Kiểm định tính toàn vẹn sa bàn và nạp lại mô hình vật lý an toàn (nguyên tử)."""
+        if preserve_target is not None and not isinstance(preserve_target, bool):
             raise ValueError("Tham số 'preserve_target' phải là kiểu boolean (true/false).")
-        resolved = (Path(model_path) if model_path is not None else self.model_path).resolve()
+        resolved = resolve_arena_model(model_path) if model_path is not None else self.model_path
         verify_arena_integrity(resolved)
 
-        prev_target_pos = self.data.mocap_pos[0].copy()
         new_model = mujoco.MjModel.from_xml_path(str(resolved))
+        new_sensor_adr, new_rangefinders = _discover_sensors(new_model)
+        validated_target: tuple[float, float] | None = None
+        if target_xy is not None:
+            validated_target = self.validate_target_xy(target_xy, model=new_model)
+
+        keep_prev = (resolved == self.model_path) if preserve_target is None else preserve_target
+        prev_target_pos = self.data.mocap_pos[0].copy()
+
         new_data = mujoco.MjData(new_model)
-        new_sensor_adr = {
-            name: int(new_model.sensor_adr[mujoco.mj_name2id(new_model, mujoco.mjtObj.mjOBJ_SENSOR, name)])
-            for name in (
-                "rf_left",
-                "rf_center",
-                "rf_right",
-                "left_wheel_vel",
-                "right_wheel_vel",
-                "chassis_vel",
-                "chassis_gyro",
-            )
-        }
+        new_default_target_pos = new_data.mocap_pos[0].copy()
+        _apply_spawn_pose(new_model, new_data)
+        if validated_target is not None:
+            new_data.mocap_pos[0] = [
+                validated_target[0],
+                validated_target[1],
+                float(new_default_target_pos[2]),
+            ]
+        elif keep_prev:
+            new_data.mocap_pos[0] = [
+                float(prev_target_pos[0]),
+                float(prev_target_pos[1]),
+                float(new_default_target_pos[2]),
+            ]
+        else:
+            new_data.mocap_pos[0] = new_default_target_pos.copy()
+        mujoco.mj_forward(new_model, new_data)
 
         self.close()
         self.model_path = resolved
         self.model = new_model
         self.data = new_data
-        self._default_target_pos = self.data.mocap_pos[0].copy()
+        self._default_target_pos = new_default_target_pos
         self._sensor_adr = new_sensor_adr
+        self._rangefinders = new_rangefinders
         self._command_deadline = None
         self._gyro_yaw_rad = 0.0
         self._odom_dist_m = 0.0
-        if preserve_target:
-            self.data.mocap_pos[0] = [
-                float(prev_target_pos[0]),
-                float(prev_target_pos[1]),
-                float(self._default_target_pos[2]),
-            ]
-        mujoco.mj_forward(self.model, self.data)
         return self.get_status()
 
     def _get_renderer(self, width: int, height: int) -> mujoco.Renderer:
@@ -188,8 +228,12 @@ class RobotSimulation:
         self._command_deadline = None
         return {"stopped": True, "sim_time": round(float(self.data.time), 4)}
 
-    @staticmethod
-    def validate_target_xy(target_xy: tuple[float, float] | list[float]) -> tuple[float, float]:
+    def validate_target_xy(
+        self,
+        target_xy: tuple[float, float] | list[float],
+        *,
+        model: mujoco.MjModel | None = None,
+    ) -> tuple[float, float]:
         if not isinstance(target_xy, (list, tuple)) or len(target_xy) != 2:
             raise ValueError("'target_xy' phải là danh sách gồm đúng 2 số [x, y].")
         _require_finite(target_x=target_xy[0], target_y=target_xy[1])
@@ -198,6 +242,46 @@ class RobotSimulation:
             raise ValueError(
                 f"Tọa độ mục tiêu ({tx}, {ty}) nằm ngoài vùng an toàn của sân [-{ARENA_SAFE_LIMIT}, {ARENA_SAFE_LIMIT}]m."
             )
+
+        target_model = model if model is not None else self.model
+        target_radius = 0.10
+        box_type = int(mujoco.mjtGeom.mjGEOM_BOX)
+        cyl_type = int(mujoco.mjtGeom.mjGEOM_CYLINDER)
+
+        for gid in range(target_model.ngeom):
+            gname = mujoco.mj_id2name(target_model, mujoco.mjtObj.mjOBJ_GEOM, gid) or ""
+            gtype = int(target_model.geom_type[gid])
+            bid = int(target_model.geom_bodyid[gid])
+            bname = mujoco.mj_id2name(target_model, mujoco.mjtObj.mjOBJ_BODY, bid) or ""
+
+            if gname.startswith(("wall_", "maze_w")) and gtype == box_type:
+                cx = float(target_model.body_pos[bid][0] + target_model.geom_pos[gid][0])
+                cy = float(target_model.body_pos[bid][1] + target_model.geom_pos[gid][1])
+                sx = float(target_model.geom_size[gid][0])
+                sy = float(target_model.geom_size[gid][1])
+                dx = max(abs(tx - cx) - sx, 0.0)
+                dy = max(abs(ty - cy) - sy, 0.0)
+                if math.hypot(dx, dy) < target_radius - 1e-6:
+                    raise ValueError(
+                        f"Tọa độ mục tiêu ({tx}, {ty}) chồng lấn lên tường '{gname}'."
+                    )
+            elif bname.startswith("obs_"):
+                ox = float(target_model.body_pos[bid][0] + target_model.geom_pos[gid][0])
+                oy = float(target_model.body_pos[bid][1] + target_model.geom_pos[gid][1])
+                if gtype == box_type:
+                    sx = float(target_model.geom_size[gid][0])
+                    sy = float(target_model.geom_size[gid][1])
+                    if abs(tx - ox) <= sx + 1e-6 and abs(ty - oy) <= sy + 1e-6:
+                        raise ValueError(
+                            f"Tọa độ mục tiêu ({tx}, {ty}) nằm bên trong vật cản '{bname}'."
+                        )
+                elif gtype == cyl_type:
+                    rad = float(target_model.geom_size[gid][0])
+                    if math.hypot(tx - ox, ty - oy) <= rad + 1e-6:
+                        raise ValueError(
+                            f"Tọa độ mục tiêu ({tx}, {ty}) nằm bên trong vật cản '{bname}'."
+                        )
+
         return tx, ty
 
     def reset(self, target_xy: tuple[float, float] | list[float] | None = None) -> dict:
@@ -206,8 +290,8 @@ class RobotSimulation:
         else:
             tx, ty = float(self._default_target_pos[0]), float(self._default_target_pos[1])
 
-
         mujoco.mj_resetData(self.model, self.data)
+        _apply_spawn_pose(self.model, self.data)
         self.data.mocap_pos[0] = [tx, ty, float(self._default_target_pos[2])]
         self._command_deadline = None
         self._gyro_yaw_rad = 0.0
@@ -235,17 +319,21 @@ class RobotSimulation:
         for _ in range(steps):
             self.step_once()
 
-    def _read_rangefinder(self, sensor_name: str) -> tuple[float, bool]:
-        raw = float(self.data.sensordata[self._sensor_adr[sensor_name]])
-        if raw < 0.0 or raw >= RANGEFINDER_MAX - 1e-6:
-            return RANGEFINDER_MAX, False
+    def _read_rangefinder(self, key: str) -> tuple[float, bool]:
+        adr, cutoff = self._rangefinders[key]
+        raw = float(self.data.sensordata[adr])
+        if raw < 0.0 or raw >= cutoff - 1e-6:
+            return round(cutoff, 4), False
         return round(raw, 4), True
 
     def get_status(self, include_vision: bool = False) -> dict:
         mujoco.mj_forward(self.model, self.data)
-        rf_l, hit_l = self._read_rangefinder("rf_left")
-        rf_c, hit_c = self._read_rangefinder("rf_center")
-        rf_r, hit_r = self._read_rangefinder("rf_right")
+        rangefinders_m: dict[str, float] = {}
+        rangefinder_hits: dict[str, bool] = {}
+        for key in self._rangefinders:
+            dist_m, hit = self._read_rangefinder(key)
+            rangefinders_m[key] = dist_m
+            rangefinder_hits[key] = hit
 
         left_vel = float(self.data.sensordata[self._sensor_adr["left_wheel_vel"]])
         right_vel = float(self.data.sensordata[self._sensor_adr["right_wheel_vel"]])
@@ -270,8 +358,8 @@ class RobotSimulation:
             "moving": remaining > 0.0,
             "command_remaining_s": round(remaining, 4),
             "sensors": {
-                "rangefinders_m": {"left": rf_l, "center": rf_c, "right": rf_r},
-                "rangefinder_hits": {"left": hit_l, "center": hit_c, "right": hit_r},
+                "rangefinders_m": rangefinders_m,
+                "rangefinder_hits": rangefinder_hits,
                 "wheel_vel_rad_s": {"left": round(left_vel, 4), "right": round(right_vel, 4)},
                 "forward_speed_m_s": round(forward_speed, 4),
                 "odom_dist_m": round(self._odom_dist_m, 4),
@@ -279,6 +367,8 @@ class RobotSimulation:
                 "gyro_yaw_deg": round(math.degrees(self._gyro_yaw_rad), 3),
             },
             "debug": {
+                "arena": identify_arena_id(self.model_path),
+                "model": self.model_path.name,
                 "robot_xy": [round(float(self.data.qpos[0]), 4), round(float(self.data.qpos[1]), 4)],
                 "robot_yaw_deg": round(math.degrees(yaw_rad), 2),
                 "target_xy": [
