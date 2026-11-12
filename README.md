@@ -8,13 +8,15 @@ Dự án nhập môn thực hành mô phỏng vật lý **MuJoCo** dành cho ng�
 
 ## 1. Cấu trúc Dự án
 
-- `models/arena_2wheel.xml` — Mô hình vật lý MJCF (có chú thích tiếng Việt từng thẻ) của xe 2 bánh vi sai, cặp bánh cầu đỡ trước/sau chống chúi mũi, camera mũi xe, 3 cảm biến khoảng cách, IMU, tường bao, hộp cản màu và trụ đích màu xanh lá.
-- `robot_sim/core.py` — Lõi điều khiển vật lý, tích phân IMU Gyro 500 Hz, chuẩn hóa cảm biến, nạp nóng mô hình (`reload`) và phân tích `Edge Vision` trong RAM.
-- `robot_sim/skills.py` — Các kỹ năng phản xạ khép kín 20 Hz chuẩn Sim-to-Real (`scan`, `approach`, xoay khép kín theo Gyro, chờ tắt dao động sau lệnh).
-- `robot_sim/telemetry.py` — Hộp đen giám sát nền 10 Hz (0 token LLM) xuất báo cáo tóm tắt JSON `< 2 KB`.
-- `robot_sim/integrity.py` — Hàng rào chống gian lận khóa cứng kích thước sa bàn, vật cản và mục tiêu khi tự động R&D.
-- `sim_server.py` — Chương trình mở **cửa sổ 3D MuJoCo trực tiếp** kèm máy chủ HTTP cục bộ (`127.0.0.1:8765`).
-- `robot_ctl.py` — Công cụ dòng lệnh cho người dùng và Antigravity điều khiển, quét mục tiêu, thu thập hộp đen và nạp lại mô hình.
+- `models/robot_2wheel.xml` — Phần cứng dùng chung của xe robot 2 bánh vi sai (khung xe, 2 bánh chủ động, cặp bánh cầu đỡ trước/sau, camera mũi xe `front_cam`, các cảm biến khoảng cách `<rangefinder>` và IMU), được nhúng chung vào mọi sa bàn.
+- `models/arena_2wheel.xml`, `models/arena_maze_a.xml`, `models/arena_maze_b.xml`, `models/arena_maze_c.xml` — 4 bản đồ địa hình chuẩn (sân mở 3 vật cản màu `2wheel` và 3 mê cung nhiều tầng độ khó: `maze_a` hành lang 1.0m chữ S, `maze_b` hành lang 0.8m 9 khúc cua, `maze_c` đảo tường chữ U có vòng lặp ở tâm).
+- `robot_sim/arenas.py` — Danh bạ thông số địa hình chuẩn, giải phân giải bí danh (`2wheel`/`default`/`basic`, `maze_a`/`maze`, `maze_b`, `maze_c`) và tra cứu bản đồ.
+- `robot_sim/core.py` — Lõi điều khiển vật lý, tích phân IMU Gyro 500 Hz, tự động dò cảm biến khoảng cách động, nạp nóng/chuyển đổi bản đồ nguyên tử (`reload`) và phân tích `Edge Vision` trong RAM.
+- `robot_sim/skills.py` — Các kỹ năng phản xạ khép kín 20 Hz chuẩn Sim-to-Real (`scan`, `approach`, xoay khép kín theo Gyro, giữ hướng thẳng, chờ tắt dao động sau lệnh).
+- `robot_sim/telemetry.py` — Hộp đen giám sát nền 10 Hz (0 token LLM) xuất báo cáo tóm tắt JSON `< 2 KB` (ghi nhận va chạm tường bao, vách mê cung lẫn vật cản).
+- `robot_sim/integrity.py` — Hàng rào chống gian lận khóa cứng tất cả bản đồ `models/arena_*.xml` và kiểm tra biên dạng cơ khí Sim-to-Real của `models/robot_2wheel.xml`.
+- `sim_server.py` — Chương trình mở **cửa sổ 3D MuJoCo trực tiếp** kèm máy chủ HTTP cục bộ (`127.0.0.1:8765`, hỗ trợ `--arena`).
+- `robot_ctl.py` — Công cụ dòng lệnh cho người dùng và Antigravity điều khiển, liệt kê/đổi địa hình (`arenas`, `reload --arena`), quét mục tiêu và thu thập hộp đen.
 - `.agents/skills/robot-multi-agent-rd/` & `AGENTS.md` — Quy trình Tổ đội Multi-Agent R&D 3 vai trò tích hợp sẵn cho Antigravity.
 
 ---
@@ -26,6 +28,8 @@ Mở một cửa sổ PowerShell tại thư mục dự án và chạy:
 
 ```powershell
 uv run python sim_server.py
+# Hoặc mở thẳng vào một bản đồ mê cung:
+# uv run python sim_server.py --arena maze_a
 ```
 
 Cửa sổ 3D MuJoCo sẽ hiện lên:
@@ -68,7 +72,12 @@ uv run python robot_ctl.py reset --target-x -1.2 --target-y 1.0 --vision
 # 10. Tiếp cận khép kín 20Hz bám tâm trụ xanh kết hợp né vật cản gần
 .venv\Scripts\python.exe robot_ctl.py approach --stop-distance 0.25
 
-# 11. Nạp nóng lại models/arena_2wheel.xml sau khi tinh chỉnh thiết kế thân xe (giữ nguyên đích hiện tại)
+# 11. Xem danh sách 4 bản đồ địa hình chuẩn và chuyển đổi nóng ngay trên cửa sổ 3D đang mở!
+.venv\Scripts\python.exe robot_ctl.py arenas
+.venv\Scripts\python.exe robot_ctl.py reload --arena maze_a --vision
+# (Thử thêm các mê cung khó hơn: --arena maze_b, --arena maze_c, hoặc quay về sân mở: --arena 2wheel)
+
+# 12. Nạp nóng lại phần cứng models/robot_2wheel.xml sau khi tinh chỉnh thiết kế thân xe (giữ nguyên đích hiện tại)
 .venv\Scripts\python.exe robot_ctl.py reload --vision
 ```
 
@@ -82,20 +91,20 @@ Khi `sim_server.py` đang mở cửa sổ 3D trên màn hình, bạn chỉ cần
 
 Antigravity sẽ đóng vai "bộ não" trên robot theo đúng vòng lặp **Cảm nhận → Suy luận → Hành động (Sense → Think → Act)** tối ưu tốc độ:
 1. Gọi `robot_ctl.py status --vision` để đọc khoảng cách + **bản tóm tắt thị giác tại biên (Edge Vision JSON < 300 bytes)** phản hồi tức thì mà không làm đầy bộ nhớ ảnh; chỉ khi gặp tình huống phức tạp mới chụp thêm `captures/front_cam.jpg` (`320x240` JPEG siêu nhẹ `~4 KB`).
-2. Nhận biết các khối hộp cản và vị trí trụ đích màu xanh lá trong khung hình.
+2. Nhận biết các khối hộp cản, tường hành lang và vị trí trụ đích màu xanh lá trong khung hình.
 3. Gửi từng lệnh `turn` / `move` / `wheels` (hoặc kỹ năng `scan` / `approach`) để bạn xem xe xoay sở trực tiếp trên màn hình 3D.
 
-### Chế độ Tổ đội Multi-Agent R&D Tự Cải Tiến (3 Vai Trò)
+### Chế độ Tổ đội Multi-Agent R&D Tự Cải Tiến (3 Vai Trò & Đa Địa Hình Mê Cung)
 
-> **Lưu ý:** Nếu bạn đang mở phiên `sim_server.py` từ bản cũ, hãy nhấn `Ctrl+C` rồi chạy lại `uv run python sim_server.py` **một lần duy nhất** để kích hoạt cảm biến `gyro_yaw_deg` 500 Hz và cổng nạp nóng `/reload`.
+> **Lưu ý:** Nếu bạn đang mở phiên `sim_server.py` từ bản cũ, hãy nhấn `Ctrl+C` rồi chạy lại `uv run python sim_server.py` **một lần duy nhất** để kích hoạt cổng đa địa hình `/arenas` và chuyển đổi bản đồ nóng `/reload`.
 
 Dự án tích hợp sẵn Workspace Skill `.agents/skills/robot-multi-agent-rd/SKILL.md` vận hành 3 vai trò độc lập để tối ưu tốc độ và bảo vệ Context Window của Antigravity:
-1. **Main Agent (Tổng công trình sư):** Đặt bài toán, bật **Hộp đen Python 10 Hz** (`telemetry record` tốn 0 token LLM) và chỉ đọc bảng điểm tóm tắt `~1 KB` (`telemetry stop`) sau mỗi vòng.
-2. **`robot-driver` (Subagent Lái mù Sim-to-Real):** Gọi trực tiếp `.venv\Scripts\python.exe robot_ctl.py` với các kỹ năng khép kín 20 Hz (`scan`, `approach`, `turn` Gyro), tuyệt đối cấm `--debug` và cấm đọc mã nguồn.
-3. **`robot-engineer` (Subagent Mổ băng & Tinh chỉnh):** Khi chuyến chạy chưa đạt chuẩn, tự đối chiếu Hộp đen với mã nguồn, tinh chỉnh thuật toán hoặc cơ khí thân xe trong `models/arena_2wheel.xml` (dưới sự giám sát chống gian lận của `robot_sim/integrity.py`), chạy `pytest` và gọi `reload` để kiểm chứng ở vòng tiếp theo (tối đa 3 vòng).
+1. **Main Agent (Tổng công trình sư):** Chọn sa bàn thử thách (`reload --arena maze_a` / `maze_b` / `maze_c` / `2wheel`), bật **Hộp đen Python 10 Hz** (`telemetry record --max-duration 360` tốn 0 token LLM) và chỉ đọc bảng điểm tóm tắt `~1 KB` (`telemetry stop`) sau mỗi vòng.
+2. **`robot-driver` (Subagent Lái mù Sim-to-Real):** Gọi trực tiếp `.venv\Scripts\python.exe robot_ctl.py` với các kỹ năng khép kín 20 Hz, hoàn toàn mù tọa độ và không biết mình đang ở bản đồ nào (tuyệt đối cấm `--debug`, cấm `arenas` và cấm đọc mã nguồn).
+3. **`robot-engineer` (Subagent Mổ băng & Tinh chỉnh):** Khi chuyến chạy chưa đạt chuẩn, tự đối chiếu Hộp đen với mã nguồn, nâng cấp thuật toán điều hướng tổng quát trong `robot_sim/skills.py` hoặc gắn thêm/tinh chỉnh cảm biến & cơ khí trên `models/robot_2wheel.xml` (trong khi mọi bản đồ `models/arena_*.xml` bị khóa bất biến bởi `robot_sim/integrity.py`), chạy `pytest` và gọi `reload` để kiểm chứng ở vòng tiếp theo (tối đa 3 vòng).
 
 Bạn có thể kích hoạt ngay bằng câu lệnh trong khung chat:
-> *"Hãy dùng cơ chế Multi-Agent R&D đặt đích ở `(-1.4, 1.15)` rồi chạy thử, giám sát qua Hộp đen và tự cải tiến nếu cần!"*
+> *"Hãy nạp bản đồ mê cung `maze_a`, dùng cơ chế Multi-Agent R&D cho robot tự dò đường tìm trụ xanh lá, giám sát qua Hộp đen và tự cải tiến cảm biến/kỹ năng nếu cần!"*
 
 ---
 

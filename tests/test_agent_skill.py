@@ -18,11 +18,21 @@ def test_workspace_skill_and_agents_rules_follow_antigravity_conventions():
     assert "telemetry record" in text and "telemetry stop" in text
     assert "3" in text  # max 3 R&D rounds
 
-    assert driver_ref.is_file() and "--debug" in driver_ref.read_text(encoding="utf-8")
-    assert engineer_ref.is_file() and "pytest" in engineer_ref.read_text(encoding="utf-8")
+    driver_text = driver_ref.read_text(encoding="utf-8")
+    engineer_text = engineer_ref.read_text(encoding="utf-8")
+    assert driver_ref.is_file() and "--debug" in driver_text
+    assert "arenas" in driver_text  # explicitly forbidden for blind driver
+    assert engineer_ref.is_file() and "pytest" in engineer_text
+    assert "models/robot_2wheel.xml" in engineer_text
+    assert "--arena" in engineer_text
+
+    assert "models/robot_2wheel.xml" in text
+    assert "--arena" in text
 
     assert agents_md.is_file()
     agents_text = agents_md.read_text(encoding="utf-8")
     assert not agents_text.startswith("---\n")  # standalone AGENTS.md must NOT use YAML frontmatter
     assert len(agents_text.encode("utf-8")) < 4000
     assert ".venv\\Scripts\\python.exe" in agents_text
+    assert "models/robot_2wheel.xml" in agents_text
+    assert "--arena" in agents_text

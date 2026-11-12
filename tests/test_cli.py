@@ -188,3 +188,78 @@ def test_cli_scan_approach_and_reload_never_leak_debug_field(capsys):
         assert "debug" not in raw_out, f"'{name}' leaked debug field: {raw_out}"
         assert isinstance(parsed, dict)
 
+
+def test_cli_arenas_and_status_hide_active_arena_without_debug_and_reload_switches_arena(capsys):
+    import pytest
+
+    app = SimulationApp()
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    stop_evt = threading.Event()
+    results: dict = {}
+    err_holder: list[BaseException] = []
+
+    def run_cli_calls():
+        try:
+            assert robot_ctl.main(["--url", url, "arenas"]) == 0
+            results["arenas_blind"] = json.loads(capsys.readouterr().out)
+
+            # Custom target on 2wheel first, then switch arena via CLI reload --arena maze_a
+            assert robot_ctl.main(["--url", url, "reset", "--target-x", "-1.1", "--target-y", "0.9"]) == 0
+            capsys.readouterr()
+
+            assert robot_ctl.main(["--url", url, "reload", "--arena", "maze_a"]) == 0
+            results["reload_maze_a"] = json.loads(capsys.readouterr().out)
+
+            assert robot_ctl.main(["--url", url, "status", "--vision"]) == 0
+            results["status_vis"] = json.loads(capsys.readouterr().out)
+
+            assert robot_ctl.main(["--url", url, "arenas", "--debug"]) == 0
+            results["arenas_debug"] = json.loads(capsys.readouterr().out)
+
+            assert robot_ctl.main(["--url", url, "status", "--debug"]) == 0
+            results["status_debug"] = json.loads(capsys.readouterr().out)
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=run_cli_calls, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=10)
+            time.sleep(0.005)
+        t.join(timeout=10.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    out_blind = results["arenas_blind"]
+    assert len(out_blind["arenas"]) == 4
+    assert "active_arena" not in out_blind
+    assert "active_model" not in out_blind
+    for entry in out_blind["arenas"]:
+        assert "model_path" not in entry
+        assert "spawn_xy" not in entry
+        assert "default_target_xy" not in entry
+
+    assert "debug" not in results["reload_maze_a"]
+    assert "debug" not in results["status_vis"]
+    assert "arena" not in json.dumps(results["status_vis"])
+
+    out_debug = results["arenas_debug"]
+    assert out_debug["active_arena"] == "maze_a"
+    assert out_debug["active_model"] == "arena_maze_a.xml"
+    assert all("spawn_xy" in e and "default_target_xy" in e for e in out_debug["arenas"])
+
+    # Switching arenas without --no-preserve-target resets to maze_a default target [1.5, 1.5]
+    assert results["status_debug"]["debug"]["target_xy"] == [1.5, 1.5]
+
+    parser = robot_ctl.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["reload", "--arena", "maze_a", "--model", "models/arena_2wheel.xml"])
+
+

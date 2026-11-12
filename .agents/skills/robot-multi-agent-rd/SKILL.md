@@ -21,19 +21,24 @@ Before Round 1, read the two reference templates and register both subagent type
 For Round `i = 1..3`:
 
 1. **Set Arena Challenge (Main Agent):**
+   Switch to the requested arena (`2wheel`, `maze_a` / alias `maze`, `maze_b`, or `maze_c`) or reset target coordinates dynamically without restarting the 3D viewer:
    ```powershell
+   # Switch arena (automatically uses the arena's default spawn & target unless --target-x/--target-y are passed)
+   .venv\Scripts\python.exe robot_ctl.py reload --arena maze_a --vision
+   # Or set a custom valid target on the current arena:
    .venv\Scripts\python.exe robot_ctl.py reset --target-x <X> --target-y <Y> --vision
    ```
-   *(If `status` fails with `BridgeOfflineError` or `gyro_yaw_deg` / `/reload` is missing on an older server process, ask the user to restart `uv run python sim_server.py` once in their PowerShell window.)*
+   *(Main Agent may inspect available maps and active arena via `.venv\Scripts\python.exe robot_ctl.py arenas --debug`. If `status` fails with `BridgeOfflineError` or `/arenas` is missing on an older server process, ask the user to restart `uv run python sim_server.py` once in their PowerShell window.)*
 
 2. **Launch Zero-Token Background Blackbox (`WaitMsBeforeAsync: 500`):**
+   Use `--max-duration 360` so multi-corridor maze exploration never hits premature blackbox timeout:
    ```powershell
-   .venv\Scripts\python.exe robot_ctl.py telemetry record --hz 10 --max-duration 240
+   .venv\Scripts\python.exe robot_ctl.py telemetry record --hz 10 --max-duration 360
    ```
 
 3. **Dispatch `robot-driver` Subagent (`invoke_subagent`):**
    - Pass `TypeName: "robot-driver"`, `Model: "inherit"` (or `"flash"` when user explicitly requests fast/light model).
-   - Brief: state the mission goal (`vision.target_visible == true`, `|offset_x| < 0.25`, `0.15 <= rf_center <= 0.35`, zero collisions) without revealing `<X>, <Y>` coordinates!
+   - Brief: state ONLY the mission goal (`vision.target_visible == true`, `|offset_x| < 0.25`, `0.15 <= rf_center <= 0.35`, zero collisions) — NEVER reveal `<X>, <Y>` coordinates, spawn pose, or which arena (`2wheel` / `maze_a` / `maze_b` / `maze_c`) is loaded!
    - End turn and wait for reactive wakeup (do **not** poll).
 
 4. **Collect Compact 1 KB Scorecard:**
@@ -47,11 +52,11 @@ For Round `i = 1..3`:
    - **Pass & Optimal Criteria:**
      - `goal_reached == true`
      - `near_collision_count == 0` and `error_count == 0`
-     - `wall_time_s <= 90.0`
+     - `wall_time_s <= 90.0` on open arena (`2wheel`), or `wall_time_s <= 180.0` (`<= 180s`) on multi-corridor mazes (`maze_a`, `maze_b`, `maze_c`)
      - `anomalies.braking_rf_drop_m < 0.15`
    - If **Pass & Optimal** (or `i == 3`), stop the loop and present the round-by-round scorecard table to the user.
    - Otherwise, record current `git rev-parse HEAD` (or diff checkpoint) and dispatch **`robot-engineer`** (`invoke_subagent` with `TypeName: "robot-engineer"`), passing:
      - The `telemetry stop` JSON scorecard,
      - `robot-driver`'s short summary,
-     - Specific bottleneck to fix (e.g., occlusion recovery, obstacle clearance, approach speed, sensor tilt, actuator tuning).
-   - **Regression Guard:** After Round `i + 1` runs, if `pytest` broke or Round `i + 1` regressed severely (e.g., failed `goal_reached` or introduced collisions compared to Round `i`), revert unverified edits via `git checkout -- models/arena_2wheel.xml robot_sim robot_ctl.py` and run `.venv\Scripts\python.exe robot_ctl.py reload`.
+     - Specific bottleneck to fix (e.g., side/diagonal rangefinder coverage in `models/robot_2wheel.xml`, corridor wall-following, dead-end recovery, junction exploration, or actuator tuning).
+   - **Regression Guard:** After Round `i + 1` runs, if `pytest` broke or Round `i + 1` regressed severely (e.g., failed `goal_reached` or introduced collisions compared to Round `i`), revert unverified edits via `git checkout -- models/robot_2wheel.xml robot_sim robot_ctl.py` and run `.venv\Scripts\python.exe robot_ctl.py reload`.

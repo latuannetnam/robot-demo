@@ -4,19 +4,21 @@ import argparse
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+from pathlib import Path
 import queue
 import threading
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from robot_sim.arenas import identify_arena_id, list_arenas, resolve_arena_model
 from robot_sim.core import DEFAULT_CAMERA_HEIGHT, DEFAULT_CAMERA_WIDTH, DEFAULT_JPEG_QUALITY, RobotSimulation
 
 
 class SimulationApp:
     """Quản lý vòng lặp vật lý MuJoCo trên luồng chính và nhận lệnh qua hàng đợi từ HTTP server."""
 
-    def __init__(self, model_path: str | None = None) -> None:
+    def __init__(self, model_path: Path | str | None = None) -> None:
         self.sim = RobotSimulation(model_path=model_path)
         self._cmd_queue: queue.Queue[tuple[Callable[[RobotSimulation], dict], queue.Queue]] = queue.Queue()
         self._http_server: ThreadingHTTPServer | None = None
@@ -86,12 +88,24 @@ class SimulationApp:
                 parsed_url = urlsplit(self.path)
                 query = parse_qs(parsed_url.query)
                 if parsed_url.path == "/status":
-                    inc_vis = query.get("vision", ["0"])[0] in ("1", "true", "yes")
+                    inc_vis = query.get("vision", ["0"])[0].strip().lower() in ("1", "true", "yes")
                     code, payload = app.submit_command(lambda sim: sim.get_status(include_vision=inc_vis))
                     self._send_json(code, payload)
                 elif parsed_url.path == "/vision":
                     cam_name = query.get("camera", ["front_cam"])[0]
                     code, payload = app.submit_command(lambda sim: sim.analyze_vision(camera_name=cam_name))
+                    self._send_json(code, payload)
+                elif parsed_url.path == "/arenas":
+                    inc_dbg = query.get("debug", ["0"])[0].strip().lower() in ("1", "true", "yes")
+
+                    def _get_arenas(sim: RobotSimulation) -> dict:
+                        res: dict[str, Any] = {"arenas": list_arenas(include_debug=inc_dbg)}
+                        if inc_dbg:
+                            res["active_arena"] = identify_arena_id(sim.model_path)
+                            res["active_model"] = sim.model_path.name
+                        return res
+
+                    code, payload = app.submit_command(_get_arenas)
                     self._send_json(code, payload)
                 else:
                     self._send_json(404, {"ok": False, "error": f"Không hỗ trợ đường dẫn GET '{self.path}'."})
@@ -138,18 +152,33 @@ class SimulationApp:
                     target_xy = body.get("target_xy")
                     code, payload = app.submit_command(lambda sim: sim.reset(target_xy=target_xy))
                 elif path == "/reload":
-                    preserve_target = body.get("preserve_target", True)
+                    arena = body.get("arena")
+                    model = body.get("model")
+                    preserve_target = body.get("preserve_target")
                     target_xy = body.get("target_xy")
 
                     def _do_reload(sim: RobotSimulation) -> dict:
-                        if target_xy is not None:
-                            sim.validate_target_xy(target_xy)
-                        st = sim.reload(preserve_target=preserve_target)
+                        if arena is not None and (not isinstance(arena, str) or not arena.strip()):
+                            raise ValueError("Tham số 'arena' phải là chuỗi tên địa hình không rỗng.")
+                        if model is not None and (not isinstance(model, str) or not model.strip()):
+                            raise ValueError("Tham số 'model' phải là chuỗi đường dẫn không rỗng.")
+                        if arena is not None and model is not None:
+                            raise ValueError(
+                                "Chỉ được truyền một trong hai tham số 'arena' hoặc 'model', không truyền đồng thời."
+                            )
+                        arena_or_model = arena if arena is not None else model
+                        new_model_path = (
+                            resolve_arena_model(arena_or_model, restrict_to_models_dir=True)
+                            if arena_or_model is not None
+                            else None
+                        )
+                        st = sim.reload(
+                            model_path=new_model_path,
+                            preserve_target=preserve_target,
+                            target_xy=target_xy,
+                        )
                         app._viewer_reload_pending = True
-                        if target_xy is not None:
-                            st = sim.reset(target_xy=target_xy)
                         return st
-
 
                     code, payload = app.submit_command(_do_reload)
                 elif path == "/camera":
@@ -263,16 +292,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8765, help="Cổng HTTP (mặc định: 8765)")
     parser.add_argument("--headless", action="store_true", help="Chạy không mở cửa sổ 3D (dùng khi kiểm thử tự động)")
     parser.add_argument("--duration", type=float, default=None, help="Tự động thoát sau N giây (tùy chọn)")
+    arena_group = parser.add_mutually_exclusive_group()
+    arena_group.add_argument(
+        "--arena",
+        default=None,
+        help="Tên địa hình khởi chạy: 2wheel (mặc định), maze_a (alias: maze), maze_b, maze_c",
+    )
+    arena_group.add_argument(
+        "--model",
+        default=None,
+        help="Đường dẫn file XML mô hình khởi chạy (tùy chọn, loại trừ --arena)",
+    )
     args = parser.parse_args(argv)
 
-    app = SimulationApp()
+    try:
+        initial_model_path = resolve_arena_model(args.arena if args.arena is not None else args.model)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    app = SimulationApp(model_path=initial_model_path)
     try:
         host, port = app.start_http_server(host=args.host, port=args.port)
         mode_str = "Headless (không giao diện)" if args.headless else "Cửa sổ 3D trực tiếp"
         print(f"=== Mô phỏng Robot 2 Bánh MuJoCo đã sẵn sàng ({mode_str}) ===", flush=True)
+        print(
+            f"Địa hình khởi chạy: {identify_arena_id(app.sim.model_path)} ({app.sim.model_path.name})",
+            flush=True,
+        )
         print(f"Cổng điều khiển HTTP: http://{host}:{port}", flush=True)
         print("Thử điều khiển ở cửa sổ terminal khác bằng:", flush=True)
         print("  uv run python robot_ctl.py status", flush=True)
+        print("  uv run python robot_ctl.py arenas", flush=True)
+        print("  uv run python robot_ctl.py reload --arena maze_a", flush=True)
         print("  uv run python robot_ctl.py move 0.5 --wait", flush=True)
         print("  uv run python robot_ctl.py camera", flush=True)
         app.run_loop(headless=args.headless, duration=args.duration)

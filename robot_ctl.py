@@ -205,7 +205,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_reset.add_argument("--target-y", type=float, default=None, help="Tọa độ Y mới của mục tiêu (-1.7..1.7)")
     p_reset.add_argument("--vision", action="store_true", help="Kèm tóm tắt Edge Vision ngay sau khi reset")
 
-    p_reload = sub.add_parser("reload", help="Kiểm định chống gian lận và nạp nóng lại models/arena_2wheel.xml")
+    p_arenas = sub.add_parser("arenas", help="Liệt kê danh sách các bản đồ địa hình chuẩn có sẵn")
+    p_arenas.add_argument(
+        "--debug",
+        action="store_true",
+        help="Hiển thị thêm địa hình đang nạp, điểm xuất phát và tọa độ đích mặc định (chỉ dành cho Main Agent / Engineer)",
+    )
+
+    p_reload = sub.add_parser(
+        "reload",
+        help="Kiểm định chống gian lận và nạp nóng lại mô hình hoặc chuyển đổi bản đồ địa hình",
+    )
+    reload_group = p_reload.add_mutually_exclusive_group()
+    reload_group.add_argument(
+        "--arena",
+        default=None,
+        help="Chuyển sang địa hình chuẩn (2wheel, maze_a / maze, maze_b, maze_c)",
+    )
+    reload_group.add_argument(
+        "--model",
+        default=None,
+        help="Đường dẫn file XML mô hình trong thư mục models/ (loại trừ --arena)",
+    )
     p_reload.add_argument("--no-preserve-target", action="store_true", help="Đặt lại vị trí mục tiêu mặc định khi reload")
     p_reload.add_argument("--target-x", type=float, default=None, help="Tọa độ X mới của mục tiêu (-1.7..1.7)")
     p_reload.add_argument("--target-y", type=float, default=None, help="Tọa độ Y mới của mục tiêu (-1.7..1.7)")
@@ -337,15 +358,24 @@ def main(argv: list[str] | None = None) -> int:
             output = _strip_debug(res, keep_debug=False)
             if args.vision:
                 output["vision"] = _call_bridge(args.url, "/vision?camera=front_cam", "GET")
+        elif args.command == "arenas":
+            arenas_path = "/arenas?debug=1" if args.debug else "/arenas"
+            output = _call_bridge(args.url, arenas_path, "GET")
         elif args.command == "reload":
             if (args.target_x is None) != (args.target_y is None):
                 raise BridgeRequestError("Cần truyền cả --target-x lẫn --target-y khi đổi vị trí mục tiêu.")
             target_xy = [args.target_x, args.target_y] if args.target_x is not None else None
+            preserve_target = False if args.no_preserve_target else None
             res = _call_bridge(
                 args.url,
                 "/reload",
                 "POST",
-                {"preserve_target": not args.no_preserve_target, "target_xy": target_xy},
+                {
+                    "arena": args.arena,
+                    "model": args.model,
+                    "preserve_target": preserve_target,
+                    "target_xy": target_xy,
+                },
             )
             output = _strip_debug(res, keep_debug=False)
             if args.vision:
