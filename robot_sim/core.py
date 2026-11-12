@@ -186,18 +186,24 @@ class RobotSimulation:
         self._command_deadline = None
         return {"stopped": True, "sim_time": round(float(self.data.time), 4)}
 
+    @staticmethod
+    def validate_target_xy(target_xy: tuple[float, float] | list[float]) -> tuple[float, float]:
+        if not isinstance(target_xy, (list, tuple)) or len(target_xy) != 2:
+            raise ValueError("'target_xy' phải là danh sách gồm đúng 2 số [x, y].")
+        _require_finite(target_x=target_xy[0], target_y=target_xy[1])
+        tx, ty = float(target_xy[0]), float(target_xy[1])
+        if abs(tx) > ARENA_SAFE_LIMIT or abs(ty) > ARENA_SAFE_LIMIT:
+            raise ValueError(
+                f"Tọa độ mục tiêu ({tx}, {ty}) nằm ngoài vùng an toàn của sân [-{ARENA_SAFE_LIMIT}, {ARENA_SAFE_LIMIT}]m."
+            )
+        return tx, ty
+
     def reset(self, target_xy: tuple[float, float] | list[float] | None = None) -> dict:
         if target_xy is not None:
-            if not isinstance(target_xy, (list, tuple)) or len(target_xy) != 2:
-                raise ValueError("'target_xy' phải là danh sách gồm đúng 2 số [x, y].")
-            _require_finite(target_x=target_xy[0], target_y=target_xy[1])
-            tx, ty = float(target_xy[0]), float(target_xy[1])
-            if abs(tx) > ARENA_SAFE_LIMIT or abs(ty) > ARENA_SAFE_LIMIT:
-                raise ValueError(
-                    f"Tọa độ mục tiêu ({tx}, {ty}) nằm ngoài vùng an toàn của sân [-{ARENA_SAFE_LIMIT}, {ARENA_SAFE_LIMIT}]m."
-                )
+            tx, ty = self.validate_target_xy(target_xy)
         else:
             tx, ty = float(self._default_target_pos[0]), float(self._default_target_pos[1])
+
 
         mujoco.mj_resetData(self.model, self.data)
         self.data.mocap_pos[0] = [tx, ty, float(self._default_target_pos[2])]

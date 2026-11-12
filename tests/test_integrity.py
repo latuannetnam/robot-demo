@@ -48,3 +48,29 @@ def test_reload_rejects_tampered_or_corrupt_xml_without_breaking_sim(tmp_path: P
         assert reloaded["debug"]["target_xy"] == [-1.4, 1.15]
     finally:
         sim.close()
+
+
+def test_verify_arena_integrity_rejects_oversized_robot_geom_extents(tmp_path: Path):
+    xml_text = DEFAULT_MODEL_PATH.read_text(encoding="utf-8")
+    # Origin (0, 0, 0.06) is inside envelope, but box half-extents (1.5m x 1.5m) span the arena
+    oversized = tmp_path / "oversized_geom.xml"
+    oversized.write_text(
+        xml_text.replace('size="0.12 0.10 0.03"', 'size="1.50 1.50 0.03"', 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        verify_arena_integrity(oversized)
+
+
+def test_verify_arena_integrity_rejects_unauthorized_worldbody_elements(tmp_path: Path):
+    xml_text = DEFAULT_MODEL_PATH.read_text(encoding="utf-8")
+    injected_body = (
+        '<body name="guide_rail" pos="0.5 0 0.05">'
+        '<geom name="guide_geom" type="box" size="0.5 0.02 0.05"/>'
+        "</body>\n  </worldbody>"
+    )
+    injected_xml = tmp_path / "injected_worldbody.xml"
+    injected_xml.write_text(xml_text.replace("</worldbody>", injected_body, 1), encoding="utf-8")
+    with pytest.raises(ValueError):
+        verify_arena_integrity(injected_xml)
+

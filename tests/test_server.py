@@ -134,3 +134,42 @@ def test_server_reload_preserves_target_and_rejects_invalid_model_with_400():
     assert results["bad_preserve"][0] == 400
     assert results["bad_target"][0] == 400
 
+
+def test_server_reload_with_invalid_target_xy_does_not_partially_mutate_or_desync_viewer():
+    app = SimulationApp()
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    base = f"http://{host}:{port}"
+    stop_evt = threading.Event()
+    results: dict = {}
+
+    def client_worker():
+        try:
+            _request(f"{base}/reset", "POST", {"target_xy": [-1.2, 0.8]})
+            _request(f"{base}/move", "POST", {"meters": 0.30, "speed": 0.30})
+            time.sleep(0.35)
+            app._viewer_reload_pending = False
+            results["before"] = _request(f"{base}/status", "GET")
+            results["bad_reload"] = _request(f"{base}/reload", "POST", {"target_xy": [9.0, 0.0]})
+            results["viewer_flag_after_bad"] = app._viewer_reload_pending
+            results["after"] = _request(f"{base}/status", "GET")
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=client_worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=5)
+            time.sleep(0.005)
+        t.join(timeout=5.0)
+    finally:
+        app.shutdown()
+
+    assert results["bad_reload"][0] == 400
+    assert results["viewer_flag_after_bad"] is False
+    # Failed /reload must be atomic: robot pose and sim_time must NOT have been wiped by an early sim.reload()
+    assert results["before"][1]["data"]["debug"]["robot_xy"][0] > 0.04
+    assert results["after"][1]["data"]["debug"]["robot_xy"][0] >= results["before"][1]["data"]["debug"]["robot_xy"][0]
+    assert results["after"][1]["data"]["sim_time"] >= results["before"][1]["data"]["sim_time"]
+
+

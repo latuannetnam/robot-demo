@@ -30,6 +30,10 @@ _REQUIRED_SENSORS = (
     "chassis_gyro",
 )
 
+_ALLOWED_WORLDBODY_GEOMS = {"floor", *_EXPECTED_WALLS.keys()}
+_ALLOWED_WORLDBODY_BODIES = {*_EXPECTED_OBSTACLES.keys(), "target", "robot"}
+
+
 
 def _parse_vec(raw: str | None, expected_len: int, label: str) -> list[float]:
     if raw is None:
@@ -79,6 +83,75 @@ def _check_robot_bounds(elem: ET.Element, parent_pos: tuple[float, float, float]
             _check_robot_bounds(child, cum)
 
 
+def _robot_subtree_body_ids(mj_model: mujoco.MjModel, robot_body_id: int) -> set[int]:
+    body_ids = {robot_body_id}
+    changed = True
+    while changed:
+        changed = False
+        for bid in range(mj_model.nbody):
+            if bid not in body_ids and int(mj_model.body_parentid[bid]) in body_ids:
+                body_ids.add(bid)
+                changed = True
+    return body_ids
+
+
+def _geom_world_half_extents(mj_model: mujoco.MjModel, mj_data: mujoco.MjData, gid: int) -> tuple[float, float, float]:
+    gtype = int(mj_model.geom_type[gid])
+    if gtype in (int(mujoco.mjtGeom.mjGEOM_PLANE), int(mujoco.mjtGeom.mjGEOM_HFIELD)):
+        gname = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_GEOM, gid) or f"geom#{gid}"
+        raise ValueError(f"Vi phạm giới hạn cơ khí Sim-to-Real: không cho phép kiểu hình học vô hạn/địa hình trên robot ('{gname}').")
+
+    size = mj_model.geom_size[gid]
+    rmat = mj_data.geom_xmat[gid].reshape(3, 3)
+
+    if gtype == int(mujoco.mjtGeom.mjGEOM_SPHERE):
+        r = float(size[0])
+        return r, r, r
+    if gtype in (int(mujoco.mjtGeom.mjGEOM_BOX), int(mujoco.mjtGeom.mjGEOM_ELLIPSOID)):
+        sx, sy, sz = float(size[0]), float(size[1]), float(size[2])
+        return tuple(
+            abs(float(rmat[axis, 0])) * sx + abs(float(rmat[axis, 1])) * sy + abs(float(rmat[axis, 2])) * sz
+            for axis in range(3)
+        )
+    if gtype == int(mujoco.mjtGeom.mjGEOM_CYLINDER):
+        r, h = float(size[0]), float(size[1])
+        return tuple(
+            r * math.sqrt(max(0.0, 1.0 - float(rmat[axis, 2]) ** 2)) + h * abs(float(rmat[axis, 2]))
+            for axis in range(3)
+        )
+    if gtype == int(mujoco.mjtGeom.mjGEOM_CAPSULE):
+        r, h = float(size[0]), float(size[1])
+        return tuple(h * abs(float(rmat[axis, 2])) + r for axis in range(3))
+
+    rb = float(mj_model.geom_rbound[gid])
+    return rb, rb, rb
+
+
+def _check_robot_compiled_geom_extents(mj_model: mujoco.MjModel, robot_body_id: int) -> None:
+    mj_data = mujoco.MjData(mj_model)
+    mujoco.mj_forward(mj_model, mj_data)
+    robot_bodies = _robot_subtree_body_ids(mj_model, robot_body_id)
+
+    for gid in range(mj_model.ngeom):
+        if int(mj_model.geom_bodyid[gid]) not in robot_bodies:
+            continue
+        gname = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_GEOM, gid) or f"geom#{gid}"
+        xpos = mj_data.geom_xpos[gid]
+        hx, hy, hz = _geom_world_half_extents(mj_model, mj_data, gid)
+        if (
+            abs(float(xpos[0])) + hx > 0.25 + 1e-4
+            or abs(float(xpos[1])) + hy > 0.20 + 1e-4
+            or float(xpos[2]) - hz < -0.002
+            or float(xpos[2]) + hz > 0.30 + 1e-4
+        ):
+            raise ValueError(
+                f"Vi phạm giới hạn cơ khí Sim-to-Real: kích thước hình học '{gname}' "
+                f"(tâm={tuple(round(float(v), 4) for v in xpos)}, bán kính mở rộng={(round(hx, 4), round(hy, 4), round(hz, 4))}) "
+                f"vượt ngoài khung robot cho phép (|x|<=0.25, |y|<=0.20, 0<=z<=0.30m)."
+            )
+
+
+
 def verify_arena_integrity(model_path: Path | str | None = None) -> dict:
     """Kiểm tra chống gian lận đề bài sa bàn và đảm bảo giới hạn vật lý hợp lệ của thân xe robot."""
     resolved = (Path(model_path) if model_path is not None else DEFAULT_MODEL_PATH).resolve()
@@ -94,6 +167,26 @@ def verify_arena_integrity(model_path: Path | str | None = None) -> dict:
     worldbody = root.find("worldbody")
     if worldbody is None:
         raise ValueError("File XML thiếu thẻ <worldbody>.")
+
+    # 0. Whitelist top-level worldbody elements so unauthorized bodies/geoms cannot be injected
+    seen_geoms: set[str] = set()
+    seen_bodies: set[str] = set()
+    for child in worldbody:
+        if child.tag in ("light", "camera"):
+            continue
+        if child.tag == "geom":
+            gname = child.get("name")
+            if gname not in _ALLOWED_WORLDBODY_GEOMS or gname in seen_geoms:
+                raise ValueError(f"Vi phạm toàn vẹn sa bàn: phát hiện geom không được phép '{gname}' trong worldbody.")
+            seen_geoms.add(gname)
+        elif child.tag == "body":
+            bname = child.get("name")
+            if bname not in _ALLOWED_WORLDBODY_BODIES or bname in seen_bodies:
+                raise ValueError(f"Vi phạm toàn vẹn sa bàn: phát hiện body không được phép '{bname}' trong worldbody.")
+            seen_bodies.add(bname)
+        else:
+            raise ValueError(f"Vi phạm toàn vẹn sa bàn: thẻ '<{child.tag}>' không được phép trực tiếp trong worldbody.")
+
 
     # 1. Floor
     floor = worldbody.find("./geom[@name='floor']")
@@ -132,6 +225,8 @@ def verify_arena_integrity(model_path: Path | str | None = None) -> dict:
             tol=0.05,
         )
         _assert_collision_enabled(obs_geom, geom_name)
+        if len(list(obs_body)) != 1:
+            raise ValueError(f"Vi phạm toàn vẹn sa bàn: '{body_name}' không được chứa phần tử phụ.")
 
     # 4. Green mocap target
     target_body = worldbody.find("./body[@name='target']")
@@ -149,22 +244,31 @@ def verify_arena_integrity(model_path: Path | str | None = None) -> dict:
     )
     if target_geom.get("contype") != "1" or target_geom.get("conaffinity") != "1":
         raise ValueError("Vi phạm toàn vẹn sa bàn: 'target_geom' phải bật contype='1' và conaffinity='1'.")
+    if len(list(target_body)) != 1:
+        raise ValueError("Vi phạm toàn vẹn sa bàn: 'target' không được chứa phần tử phụ.")
 
     # 5. Robot body & Sim-to-Real physical envelope
     robot_body = worldbody.find("./body[@name='robot']")
     if robot_body is None:
         raise ValueError("Mô hình thiếu <body name='robot'>.")
+    _assert_vec_close(_parse_vec(robot_body.get("pos", "0 0 0"), 3, "robot.pos"), [0.0, 0.0, 0.0], "robot.pos")
     if robot_body.find("./freejoint") is None:
         raise ValueError("Robot bắt buộc phải di chuyển vật lý qua <freejoint>.")
     if robot_body.find(".//camera[@name='front_cam']") is None:
         raise ValueError("Camera 'front_cam' bắt buộc phải gắn trên thân 'robot'.")
     _check_robot_bounds(robot_body)
 
-    # 6. MuJoCo compilation + required sensors/actuators/cameras
+    # 6. MuJoCo compilation + required sensors/actuators/cameras + 3D geom extents
     try:
         mj_model = mujoco.MjModel.from_xml_path(str(resolved))
     except Exception as exc:
         raise ValueError(f"MuJoCo không biên dịch được mô hình '{resolved}': {exc}") from exc
+
+    robot_body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "robot")
+    if robot_body_id < 0:
+        raise ValueError("Mô hình biên dịch thiếu body 'robot'.")
+    _check_robot_compiled_geom_extents(mj_model, robot_body_id)
+
 
     for cam in ("front_cam", "overview_cam"):
         if mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_CAMERA, cam) < 0:

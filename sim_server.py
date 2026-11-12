@@ -142,11 +142,14 @@ class SimulationApp:
                     target_xy = body.get("target_xy")
 
                     def _do_reload(sim: RobotSimulation) -> dict:
+                        if target_xy is not None:
+                            sim.validate_target_xy(target_xy)
                         st = sim.reload(preserve_target=preserve_target)
+                        app._viewer_reload_pending = True
                         if target_xy is not None:
                             st = sim.reset(target_xy=target_xy)
-                        app._viewer_reload_pending = True
                         return st
+
 
                     code, payload = app.submit_command(_do_reload)
                 elif path == "/camera":
