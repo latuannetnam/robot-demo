@@ -31,6 +31,9 @@
     <!-- Camera toàn cảnh nhìn bao quát cả sân 4m x 4m -->
     <camera name="overview_cam" pos="-2.4 -2.4 2.6" xyaxes="0.707 -0.707 0 0.408 0.408 0.816" fovy="55"/>
 
+    <!-- Điểm xuất phát mặc định của xe robot trên bản đồ cơ bản -->
+    <site name="robot_spawn" pos="0 0 0" euler="0 0 0" size="0.01" rgba="0 0 0 0"/>
+
     <!-- Mặt sàn phẳng 4m x 4m (từ -2.0m đến +2.0m theo trục X và Y) -->
     <geom name="floor" type="plane" size="2.0 2.0 0.05" material="grid_mat"
           friction="0.9 0.005 0.0001"/>
@@ -57,72 +60,7 @@
       <geom name="target_geom" type="cylinder" size="0.10 0.12" rgba="0.10 0.90 0.20 1"
             contype="1" conaffinity="1"/>
     </body>
-
-    <!-- ======================== XE ROBOT 2 BÁNH ======================== -->
-    <body name="robot" pos="0 0 0">
-      <!-- freejoint cho phép xe di chuyển và xoay tự do trong không gian 3D theo định luật vật lý -->
-      <freejoint name="robot_free"/>
-
-      <!-- Khung thân xe chính (24cm x 20cm x 6cm, đặt cách mặt sàn 3cm) -->
-      <geom name="chassis" type="box" pos="0 0 0.06" size="0.12 0.10 0.03" mass="1.2"
-            rgba="0.18 0.22 0.28 1"/>
-
-      <!-- Vạch mũi xe màu cam để người xem dễ phân biệt đầu xe trên cửa sổ 3D -->
-      <geom name="nose_marker" type="box" pos="0.10 0 0.092" size="0.02 0.06 0.004" mass="0.01"
-            rgba="1.0 0.45 0.10 1" contype="0" conaffinity="0"/>
-
-      <!-- Bánh cầu đỡ tự do phía sau & phía trước (caster): ma sát rất nhỏ giúp giữ thân xe cân bằng, chống chúi mũi khi phanh -->
-      <geom name="caster" type="sphere" pos="-0.09 0 0.025" size="0.025" mass="0.1"
-            friction="0.01 0.001 0.0001" rgba="0.75 0.75 0.78 1"/>
-      <geom name="front_caster" type="sphere" pos="0.095 0 0.0265" size="0.025" mass="0.05"
-            friction="0.01 0.001 0.0001" rgba="0.75 0.75 0.78 1"/>
-
-      <!-- Điểm đặt cảm biến vận tốc / con quay hồi chuyển (IMU) tại tâm thân xe -->
-      <site name="imu_site" pos="0 0 0.06" size="0.01"/>
-
-      <!-- Camera góc nhìn thứ nhất gắn ở mũi xe, hướng thẳng về phía trước (+X) -->
-      <camera name="front_cam" pos="0.12 0 0.09" xyaxes="0 -1 0 0 0 1" fovy="65"/>
-
-      <!-- Ba điểm phát tia cảm biến khoảng cách (trong MuJoCo, rangefinder bắn tia dọc trục +Z của site) -->
-      <site name="site_rf_center" pos="0.125 0.00 0.075" zaxis="1 0 0" size="0.008" rgba="1 0.2 0.2 1"/>
-      <site name="site_rf_left"   pos="0.125 0.06 0.075" zaxis="0.866025 0.5 0" size="0.008" rgba="1 0.2 0.2 1"/>
-      <site name="site_rf_right"  pos="0.125 -0.06 0.075" zaxis="0.866025 -0.5 0" size="0.008" rgba="1 0.2 0.2 1"/>
-
-      <!-- Bánh trái: gắn khớp bản lề xoay quanh trục Y -->
-      <body name="left_wheel" pos="0.03 0.115 0.05">
-        <joint name="left_wheel_joint" type="hinge" axis="0 1 0" damping="0.02"/>
-        <geom name="left_wheel_geom" type="cylinder" size="0.05 0.012" euler="90 0 0" mass="0.2"
-              friction="1.1 0.005 0.0001" rgba="0.12 0.12 0.14 1"/>
-      </body>
-
-      <!-- Bánh phải: gắn khớp bản lề xoay quanh trục Y -->
-      <body name="right_wheel" pos="0.03 -0.115 0.05">
-        <joint name="right_wheel_joint" type="hinge" axis="0 1 0" damping="0.02"/>
-        <geom name="right_wheel_geom" type="cylinder" size="0.05 0.012" euler="90 0 0" mass="0.2"
-              friction="1.1 0.005 0.0001" rgba="0.12 0.12 0.14 1"/>
-      </body>
-    </body>
   </worldbody>
 
-  <!-- Cơ cấu chấp hành (Động cơ điều khiển vận tốc góc rad/s cho hai bánh xe) -->
-  <actuator>
-    <velocity name="left_motor"  joint="left_wheel_joint"  kv="1.0" ctrlrange="-15 15" forcerange="-2.5 2.5"/>
-    <velocity name="right_motor" joint="right_wheel_joint" kv="1.0" ctrlrange="-15 15" forcerange="-2.5 2.5"/>
-  </actuator>
-
-  <!-- Hệ thống cảm biến gắn trên xe (tương ứng cảm biến trên robot phần cứng thật) -->
-  <sensor>
-    <!-- 3 tia đo khoảng cách phía trước (tối đa 3.0m; trả về -1 nếu không gặp vật cản) -->
-    <rangefinder name="rf_left"   site="site_rf_left"   cutoff="3.0"/>
-    <rangefinder name="rf_center" site="site_rf_center" cutoff="3.0"/>
-    <rangefinder name="rf_right"  site="site_rf_right"  cutoff="3.0"/>
-
-    <!-- Encoder đo tốc độ quay thực tế của hai bánh xe (rad/s) -->
-    <jointvel name="left_wheel_vel"  joint="left_wheel_joint"/>
-    <jointvel name="right_wheel_vel" joint="right_wheel_joint"/>
-
-    <!-- Cảm biến vận tốc dài và tốc độ xoay thân xe (IMU) -->
-    <velocimeter name="chassis_vel" site="imu_site"/>
-    <gyro name="chassis_gyro" site="imu_site"/>
-  </sensor>
+  <include file="robot_2wheel.xml"/>
 </mujoco>

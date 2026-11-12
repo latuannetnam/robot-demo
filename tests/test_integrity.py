@@ -1,12 +1,24 @@
 from pathlib import Path
+import shutil
 import pytest
+
+from robot_sim.arenas import MODELS_DIR, ROBOT_INCLUDE_FILENAME, resolve_arena_model
 from robot_sim.core import DEFAULT_MODEL_PATH, RobotSimulation
 from robot_sim.integrity import verify_arena_integrity
+
+
+def _copy_arena_bundle(tmp_path: Path, arena_filename: str = "arena_2wheel.xml", dst_name: str = "tampered.xml") -> tuple[Path, Path]:
+    arena_dst = tmp_path / dst_name
+    robot_dst = tmp_path / ROBOT_INCLUDE_FILENAME
+    shutil.copyfile(MODELS_DIR / arena_filename, arena_dst)
+    shutil.copyfile(MODELS_DIR / ROBOT_INCLUDE_FILENAME, robot_dst)
+    return arena_dst, robot_dst
 
 
 def test_default_arena_passes_integrity():
     res = verify_arena_integrity(DEFAULT_MODEL_PATH)
     assert res["valid"] is True
+    assert res["arena"] == "2wheel"
 
 
 @pytest.mark.parametrize(
@@ -22,12 +34,17 @@ def test_default_arena_passes_integrity():
 def test_verify_arena_integrity_rejects_arena_or_periscope_tampering(
     tmp_path: Path, tamper_src: str, tamper_dst: str
 ):
-    xml_text = DEFAULT_MODEL_PATH.read_text(encoding="utf-8")
-    assert tamper_src in xml_text
-    bad_xml = tmp_path / "tampered.xml"
-    bad_xml.write_text(xml_text.replace(tamper_src, tamper_dst, 1), encoding="utf-8")
+    bad_arena, bad_robot = _copy_arena_bundle(tmp_path)
+    arena_text = bad_arena.read_text(encoding="utf-8")
+    robot_text = bad_robot.read_text(encoding="utf-8")
+    if tamper_src in arena_text:
+        bad_arena.write_text(arena_text.replace(tamper_src, tamper_dst, 1), encoding="utf-8")
+    else:
+        assert tamper_src in robot_text
+        bad_robot.write_text(robot_text.replace(tamper_src, tamper_dst, 1), encoding="utf-8")
+
     with pytest.raises(ValueError):
-        verify_arena_integrity(bad_xml)
+        verify_arena_integrity(bad_arena)
 
 
 def test_reload_rejects_tampered_or_corrupt_xml_without_breaking_sim(tmp_path: Path):
@@ -51,26 +68,117 @@ def test_reload_rejects_tampered_or_corrupt_xml_without_breaking_sim(tmp_path: P
 
 
 def test_verify_arena_integrity_rejects_oversized_robot_geom_extents(tmp_path: Path):
-    xml_text = DEFAULT_MODEL_PATH.read_text(encoding="utf-8")
+    oversized_arena, oversized_robot = _copy_arena_bundle(tmp_path, dst_name="oversized_geom.xml")
+    robot_text = oversized_robot.read_text(encoding="utf-8")
+    assert 'size="0.12 0.10 0.03"' in robot_text
     # Origin (0, 0, 0.06) is inside envelope, but box half-extents (1.5m x 1.5m) span the arena
-    oversized = tmp_path / "oversized_geom.xml"
-    oversized.write_text(
-        xml_text.replace('size="0.12 0.10 0.03"', 'size="1.50 1.50 0.03"', 1),
+    oversized_robot.write_text(
+        robot_text.replace('size="0.12 0.10 0.03"', 'size="1.50 1.50 0.03"', 1),
         encoding="utf-8",
     )
     with pytest.raises(ValueError):
-        verify_arena_integrity(oversized)
+        verify_arena_integrity(oversized_arena)
 
 
 def test_verify_arena_integrity_rejects_unauthorized_worldbody_elements(tmp_path: Path):
-    xml_text = DEFAULT_MODEL_PATH.read_text(encoding="utf-8")
+    injected_arena, _ = _copy_arena_bundle(tmp_path, dst_name="injected_worldbody.xml")
+    xml_text = injected_arena.read_text(encoding="utf-8")
     injected_body = (
         '<body name="guide_rail" pos="0.5 0 0.05">'
         '<geom name="guide_geom" type="box" size="0.5 0.02 0.05"/>'
         "</body>\n  </worldbody>"
     )
-    injected_xml = tmp_path / "injected_worldbody.xml"
-    injected_xml.write_text(xml_text.replace("</worldbody>", injected_body, 1), encoding="utf-8")
+    injected_arena.write_text(xml_text.replace("</worldbody>", injected_body, 1), encoding="utf-8")
     with pytest.raises(ValueError):
-        verify_arena_integrity(injected_xml)
+        verify_arena_integrity(injected_arena)
 
+
+@pytest.mark.parametrize(
+    "tamper_src,tamper_dst",
+    [
+        ('pos="1.5 1.0 0.14" size="0.52 0.02 0.14"', 'pos="1.5 1.0 0.14" size="0.10 0.02 0.14"'),  # shrunk maze_w02
+        ('pos="1.5 1.0 0.14" size="0.52 0.02 0.14"', 'pos="0.5 1.0 0.14" size="0.52 0.02 0.14"'),  # moved maze_w02
+        ('name="robot_spawn" pos="-1.5 -1.5 0"', 'name="robot_spawn" pos="1.0 1.5 0"'),             # moved robot_spawn
+        ('name="robot_spawn" pos="-1.5 -1.5 0" euler="0 0 0"', 'name="robot_spawn" pos="-1.5 -1.5 0" euler="0 0 90"'),
+    ],
+)
+def test_verify_arena_integrity_rejects_maze_wall_tampering(
+    tmp_path: Path, tamper_src: str, tamper_dst: str
+):
+    bad_maze, _ = _copy_arena_bundle(tmp_path, arena_filename="arena_maze_a.xml", dst_name="tampered_maze_a.xml")
+    maze_text = bad_maze.read_text(encoding="utf-8")
+    assert tamper_src in maze_text
+    bad_maze.write_text(maze_text.replace(tamper_src, tamper_dst, 1), encoding="utf-8")
+    with pytest.raises(ValueError):
+        verify_arena_integrity(bad_maze)
+
+
+@pytest.mark.parametrize(
+    "bad_include",
+    [
+        '../outside.xml',
+        'C:/outside.xml',
+        'subdir/robot_2wheel.xml',
+    ],
+)
+def test_verify_arena_integrity_rejects_include_path_traversal(tmp_path: Path, bad_include: str):
+    sub = tmp_path / "nested"
+    sub.mkdir(parents=True, exist_ok=True)
+    # Place a valid robot xml at ../outside.xml so traversal is rejected by policy, not file-not-found
+    shutil.copyfile(MODELS_DIR / ROBOT_INCLUDE_FILENAME, tmp_path / "outside.xml")
+    bad_arena, _ = _copy_arena_bundle(sub, arena_filename="arena_maze_a.xml", dst_name="traversal.xml")
+    xml_text = bad_arena.read_text(encoding="utf-8")
+    bad_arena.write_text(
+        xml_text.replace(f'<include file="{ROBOT_INCLUDE_FILENAME}"/>', f'<include file="{bad_include}"/>', 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        verify_arena_integrity(bad_arena)
+
+
+def test_verify_arena_integrity_checks_robot_extents_relative_to_off_origin_spawn(tmp_path: Path):
+    maze_copy, robot_copy = _copy_arena_bundle(
+        tmp_path, arena_filename="arena_maze_a.xml", dst_name="arena_maze_a.xml"
+    )
+    res = verify_arena_integrity(maze_copy)
+    assert res["valid"] is True
+    assert res["arena"] == "maze_a"
+
+    # Also verify explicit robot body at (-1.5, -1.5, 0) passes when valid
+    robot_at_spawn = robot_copy.read_text(encoding="utf-8").replace(
+        '<body name="robot" pos="0 0 0">', '<body name="robot" pos="-1.5 -1.5 0">', 1
+    )
+    robot_copy.write_text(robot_at_spawn, encoding="utf-8")
+    assert verify_arena_integrity(maze_copy)["valid"] is True
+
+    # Inflating chassis size to 1.50 x 1.50m must still fail relative to off-origin spawn
+    robot_copy.write_text(
+        robot_at_spawn.replace('size="0.12 0.10 0.03"', 'size="1.50 1.50 0.03"', 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        verify_arena_integrity(maze_copy)
+
+
+def test_verify_arena_integrity_supports_standalone_inline_robot_and_rejects_unknown_model_attr(tmp_path: Path):
+    arena_text = resolve_arena_model("2wheel").read_text(encoding="utf-8")
+    inc_root_text = (MODELS_DIR / ROBOT_INCLUDE_FILENAME).read_text(encoding="utf-8")
+    # Strip <mujocoinclude> wrapper and inline <body name="robot"> into <worldbody>, <actuator>/<sensor> under <mujoco>
+    robot_body_block = inc_root_text.split("<worldbody>", 1)[1].split("</worldbody>", 1)[0]
+    rest_block = inc_root_text.split("</worldbody>", 1)[1].rsplit("</mujocoinclude>", 1)[0]
+    inline_xml = arena_text.replace("</worldbody>", f"{robot_body_block}</worldbody>", 1).replace(
+        f'<include file="{ROBOT_INCLUDE_FILENAME}"/>', rest_block, 1
+    )
+    standalone = tmp_path / "standalone_inline.xml"
+    standalone.write_text(inline_xml, encoding="utf-8")
+    res = verify_arena_integrity(standalone)
+    assert res["valid"] is True
+    assert res["arena"] == "2wheel"
+
+    unknown_model = tmp_path / "unknown_model.xml"
+    unknown_model.write_text(
+        inline_xml.replace('model="arena_2wheel"', 'model="arena_hacked"', 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        verify_arena_integrity(unknown_model)

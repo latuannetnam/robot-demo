@@ -1,0 +1,61 @@
+<mujoco model="arena_maze_b">
+  <!-- =====================================================================
+       MÊ CUNG B (5x5, hành lang 0.8m): 3 nhánh ngõ cụt, 9 khúc cua vuông góc
+       Xuất phát: (0.0, 0.0), yaw=0° | Đích: (1.6, 1.6)
+       ===================================================================== -->
+
+  <compiler angle="degree" coordinate="local"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
+
+  <visual>
+    <global offwidth="640" offheight="480"/>
+    <headlight ambient="0.45 0.45 0.45" diffuse="0.75 0.75 0.75" specular="0.2 0.2 0.2"/>
+  </visual>
+
+  <asset>
+    <texture name="grid_tex" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.86 0.88 0.90" rgb2="0.72 0.75 0.79"/>
+    <material name="grid_mat" texture="grid_tex" texrepeat="8 8" reflectance="0.08"/>
+    <texture name="sky_tex" type="skybox" builtin="gradient" width="256" height="256"
+             rgb1="0.82 0.90 0.98" rgb2="0.96 0.98 1.0"/>
+  </asset>
+
+  <worldbody>
+    <light name="sun" pos="0 0 4.0" dir="0 0 -1" directional="true" castshadow="true"/>
+
+    <camera name="overview_cam" pos="0 -3.3 4.2" xyaxes="1 0 0 0 0.78 0.62" fovy="52"/>
+
+    <site name="robot_spawn" pos="0.0 0.0 0" euler="0 0 0" size="0.01" rgba="0 0 0 0"/>
+
+    <geom name="floor" type="plane" size="2.0 2.0 0.05" material="grid_mat"
+          friction="0.9 0.005 0.0001"/>
+
+    <!-- Tường bao 4 phía cao 0.28m -->
+    <geom name="wall_north" type="box" pos="0 2.025 0.14" size="2.05 0.025 0.14" rgba="0.35 0.38 0.42 1"/>
+    <geom name="wall_south" type="box" pos="0 -2.025 0.14" size="2.05 0.025 0.14" rgba="0.35 0.38 0.42 1"/>
+    <geom name="wall_east"  type="box" pos="2.025 0 0.14" size="0.025 2.00 0.14" rgba="0.35 0.38 0.42 1"/>
+    <geom name="wall_west"  type="box" pos="-2.025 0 0.14" size="0.025 2.00 0.14" rgba="0.35 0.38 0.42 1"/>
+
+    <!-- 12 vách ngăn mê cung cao 0.28m, dày 0.04m -->
+    <geom name="maze_w01" type="box" pos="-0.8 1.2 0.14" size="0.42 0.02 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w02" type="box" pos="1.6 1.2 0.14" size="0.42 0.02 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w03" type="box" pos="-1.2 0.4 0.14" size="0.82 0.02 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w04" type="box" pos="0.0 -0.4 0.14" size="0.42 0.02 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w05" type="box" pos="1.6 -0.4 0.14" size="0.42 0.02 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w06" type="box" pos="-0.8 -1.2 0.14" size="0.42 0.02 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w07" type="box" pos="0.8 -1.2 0.14" size="0.42 0.02 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w08" type="box" pos="-1.2 -0.8 0.14" size="0.02 0.42 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w09" type="box" pos="-0.4 0.8 0.14" size="0.02 0.42 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w10" type="box" pos="-0.4 -1.6 0.14" size="0.02 0.42 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w11" type="box" pos="0.4 0.4 0.14" size="0.02 1.62 0.14" rgba="0.48 0.52 0.57 1"/>
+    <geom name="maze_w12" type="box" pos="1.2 0.8 0.14" size="0.02 0.42 0.14" rgba="0.48 0.52 0.57 1"/>
+
+    <body name="target" mocap="true" pos="1.6 1.6 0.12">
+      <geom name="target_geom" type="cylinder" size="0.10 0.12" rgba="0.10 0.90 0.20 1"
+            contype="1" conaffinity="1"/>
+    </body>
+  </worldbody>
+
+  <include file="robot_2wheel.xml"/>
+</mujoco>
