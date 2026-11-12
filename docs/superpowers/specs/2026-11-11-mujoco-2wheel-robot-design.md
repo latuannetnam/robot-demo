@@ -1,7 +1,7 @@
 # Thiết kế Dự án: Mô phỏng Xe Robot 2 Bánh trong MuJoCo & Điều khiển qua Antigravity
 
 - **Ngày:** 2026-11-11
-- **Thư mục dự án:** `C:\Users\latuan\Programming\robot-demo`
+- **Thư mục dự án:** `robot-demo`
 
 ---
 

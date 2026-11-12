@@ -1,7 +1,43 @@
+# Virtual environments
 .venv/
+venv/
+env/
+
+# Python bytecode & build artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+
+# Test, lint & typecheck caches
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Environment variables & secrets
+.env
+.env.*
+*.pem
+*.key
+*secret*
+*credentials*
+
+# Runtime captures, telemetry & agent scratch directories
 captures/
 .superpowers/
 .worktrees/
+scratch/
+*.log
+*.tmp
+
+# IDE & OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+

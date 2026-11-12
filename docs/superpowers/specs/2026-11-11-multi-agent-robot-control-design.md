@@ -1,7 +1,7 @@
 # Thiết kế: Cơ chế Điều khiển, Giám sát & Tự Cải tiến Robot với Multi-Agent trên Antigravity
 
 - **Ngày:** 2026-11-11
-- **Thư mục dự án:** `C:\Users\latuan\Programming\robot-demo`
+- **Thư mục dự án:** `robot-demo`
 - **Tài liệu nền tảng trước đó:** `docs/superpowers/specs/2026-11-11-mujoco-2wheel-robot-design.md`
 
 ---
