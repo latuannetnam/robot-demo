@@ -9,7 +9,13 @@ import time
 import urllib.error
 import urllib.request
 
-from robot_sim.skills import approach_target, closed_loop_turn, scan_for_target, wait_until_settled
+from robot_sim.skills import (
+    approach_target,
+    closed_loop_move,
+    closed_loop_turn,
+    scan_for_target,
+    wait_until_settled,
+)
 from robot_sim.telemetry import (
     DEFAULT_STOP_FLAG_PATH,
     DEFAULT_TELEMETRY_PATH,
@@ -164,8 +170,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_move.add_argument("meters", type=float, nargs="?", default=None, help="Quãng đường cần đi (m, âm để lùi)")
     p_move.add_argument("--meters", dest="meters_opt", type=float, default=None, help="Quãng đường cần đi (m)")
     p_move.add_argument("--speed", type=float, default=0.25, help="Tốc độ dài ước lượng (m/s, mặc định: 0.25)")
-    p_move.add_argument("--wait", action="store_true", help="Chờ xe chạy xong rồi in cảm biến mới")
+    p_move.add_argument("--wait", action="store_true", help="Chờ xe chạy xong (mặc định giữ thẳng hướng bằng Gyro khép kín)")
     p_move.add_argument("--vision", action="store_true", help="Kèm tóm tắt Edge Vision trong after_status khi dùng --wait")
+    p_move.add_argument("--open-loop", action="store_true", help="Di chuyển vòng hở theo thời gian cố định thay vì Gyro")
 
     p_turn = sub.add_parser("turn", help="Xoay tại chỗ một góc (độ: + quay trái, - quay phải)")
     p_turn.add_argument("degrees", type=float, nargs="?", default=None, help="Góc xoay (độ, + trái / - phải)")
@@ -179,11 +186,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--max-degrees", type=float, default=360.0, help="Góc quét tối đa (0..720, mặc định: 360)")
     p_scan.add_argument("--direction", default="left", choices=["left", "right"], help="Chiều quét (left hoặc right)")
     p_scan.add_argument("--speed", type=float, default=75.0, help="Tốc độ góc khi quét (độ/s, mặc định: 75)")
+    p_scan.add_argument(
+        "--recover-occlusion",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Tự động tiến 0.85m vào hành lang thoáng tạo thị sai và quét lại nếu 360° đầu bị khuất (mặc định: bật)",
+    )
 
-    p_approach = sub.add_parser("approach", help="Tiếp cận mục tiêu xanh khép kín 20Hz kết hợp né vật cản gần")
+    p_approach = sub.add_parser("approach", help="Tiếp cận mục tiêu xanh khép kín 20Hz kết hợp né hành lang vật cản")
     p_approach.add_argument("--stop-distance", type=float, default=0.25, help="Khoảng cách dừng trước đích (0.12..1.5m)")
-    p_approach.add_argument("--max-steps", type=int, default=65, help="Số nhịp điều khiển tối đa (mặc định: 65)")
-    p_approach.add_argument("--step-dt", type=float, default=0.18, help="Chu kỳ mỗi nhịp điều khiển (giây)")
+    p_approach.add_argument("--max-steps", type=int, default=120, help="Số nhịp điều khiển tối đa (mặc định: 120)")
+    p_approach.add_argument("--step-dt", type=float, default=0.15, help="Chu kỳ mỗi nhịp điều khiển (giây)")
 
     sub.add_parser("stop", help="Dừng khẩn cấp hai động cơ bánh xe")
 
@@ -260,11 +273,20 @@ def main(argv: list[str] | None = None) -> int:
             meters = args.meters_opt if args.meters_opt is not None else args.meters
             if meters is None:
                 raise BridgeRequestError("Vui lòng truyền quãng đường (ví dụ: move 0.5 hoặc move -0.3).")
-            output = _call_bridge(args.url, "/move", "POST", {"meters": meters, "speed": args.speed})
-            if args.wait:
-                output["after_status"] = _wait_for_completion(
-                    args.url, output["duration_s"], include_vision=args.vision
+            if args.wait and not args.open_loop:
+                call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
+                output = closed_loop_move(
+                    call_fn,
+                    meters=meters,
+                    speed_m_s=args.speed,
+                    include_vision=args.vision,
                 )
+            else:
+                output = _call_bridge(args.url, "/move", "POST", {"meters": meters, "speed": args.speed})
+                if args.wait:
+                    output["after_status"] = _wait_for_completion(
+                        args.url, output["duration_s"], include_vision=args.vision
+                    )
         elif args.command == "turn":
             degrees = args.degrees_opt if args.degrees_opt is not None else args.degrees
             if degrees is None:
@@ -295,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_degrees=args.max_degrees,
                 direction=args.direction,
                 angular_speed_deg_s=args.speed,
+                recover_occlusion=args.recover_occlusion,
             )
         elif args.command == "approach":
             call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)

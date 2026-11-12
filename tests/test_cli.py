@@ -156,8 +156,12 @@ def test_cli_scan_approach_and_reload_never_leak_debug_field(capsys):
             assert robot_ctl.main(["--url", url, "reload", "--vision"]) == 0
             outputs["reload"] = capsys.readouterr().out
 
-            assert robot_ctl.main(["--url", url, "scan", "--max-degrees", "90"]) == 0
+            assert robot_ctl.main(["--url", url, "scan", "--max-degrees", "90", "--no-recover-occlusion"]) == 0
             outputs["scan"] = capsys.readouterr().out
+
+            parser = robot_ctl.build_parser()
+            assert parser.parse_args(["scan"]).recover_occlusion is True
+            assert parser.parse_args(["scan", "--no-recover-occlusion"]).recover_occlusion is False
 
             assert robot_ctl.main(["--url", url, "approach", "--stop-distance", "0.28"]) == 0
             outputs["approach"] = capsys.readouterr().out
