@@ -263,3 +263,39 @@ def test_cli_arenas_and_status_hide_active_arena_without_debug_and_reload_switch
         parser.parse_args(["reload", "--arena", "maze_a", "--model", "models/arena_2wheel.xml"])
 
 
+def test_cli_explore_subcommand_runs_and_strips_debug(capsys):
+    app = SimulationApp()
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    stop_evt = threading.Event()
+    holder: dict = {}
+    err_holder: list[BaseException] = []
+
+    def worker():
+        try:
+            assert robot_ctl.main(["--url", url, "explore", "--rule", "right", "--max-steps", "5"]) == 0
+            holder["out"] = json.loads(capsys.readouterr().out)
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=10)
+            time.sleep(0.005)
+        t.join(timeout=15.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    out = holder["out"]
+    assert out["rule"] == "right"
+    assert "target_found" in out
+    assert "debug" not in out["after_status"]
+
+

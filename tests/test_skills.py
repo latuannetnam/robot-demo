@@ -3,7 +3,7 @@ import time
 import pytest
 from sim_server import SimulationApp
 import robot_ctl
-from robot_sim.skills import approach_target, closed_loop_move, closed_loop_turn, scan_for_target
+from robot_sim.skills import approach_target, closed_loop_move, closed_loop_turn, explore_maze, scan_for_target
 
 
 def _wrap_deg(deg: float) -> float:
@@ -33,6 +33,18 @@ def test_closed_loop_turn_small_and_large_angles_and_skills_validate_inputs():
             res2 = closed_loop_turn(call_fn, 66.0, max_speed_deg_s=95.0, include_vision=True)
             raw_status = call_fn("/status", "GET")
 
+            # Fast-settle 90 deg high-rate turn used inside explore_maze
+            t_fast_start = float(raw_status["sim_time"])
+            res_fast = closed_loop_turn(
+                call_fn,
+                -90.0,
+                max_speed_deg_s=240.0,
+                tol_deg=1.4,
+                include_vision=False,
+                release_stop=False,
+                fast_settle=True,
+            )
+
             holder["s1"] = s1
             holder["s2"] = s2
             holder["yaw_after_6"] = yaw_after_6
@@ -40,6 +52,8 @@ def test_closed_loop_turn_small_and_large_angles_and_skills_validate_inputs():
             holder["res1"] = res1
             holder["res2"] = res2
             holder["true_yaw"] = raw_status["debug"]["robot_yaw_deg"]
+            holder["res_fast"] = res_fast
+            holder["fast_sim_dt"] = float(res_fast["after_status"]["sim_time"]) - t_fast_start
 
             for fn, kwargs in (
                 (closed_loop_turn, {"degrees": 0.0}),
@@ -49,6 +63,9 @@ def test_closed_loop_turn_small_and_large_angles_and_skills_validate_inputs():
                 (scan_for_target, {"direction": "up"}),
                 (approach_target, {"stop_distance": 0.05}),
                 (approach_target, {"stop_distance": 2.0}),
+                (explore_maze, {"rule": "up"}),
+                (explore_maze, {"max_steps": 0}),
+                (explore_maze, {"speed_m_s": -0.1}),
             ):
                 with pytest.raises(ValueError):
                     fn(call_fn, **kwargs)
@@ -79,6 +96,8 @@ def test_closed_loop_turn_small_and_large_angles_and_skills_validate_inputs():
     assert "debug" not in holder["res2"]["after_status"]
     assert "vision" in holder["res2"]["after_status"]
     assert abs(_wrap_deg(holder["true_yaw"] - (-150.0))) < 2.0
+    assert abs(holder["res_fast"]["measured_turn_deg"] - (-90.0)) < 2.5
+    assert holder["fast_sim_dt"] < 2.2
 
 
 def test_closed_loop_move_holds_heading_under_1_deg_and_safety_stops():
@@ -355,3 +374,155 @@ def test_scan_occlusion_recovery_and_approach_smooth_decel_and_safety_stop(tmp_p
     assert tel["goal_reached"] is True, f"Telemetry goal_reached False: {tel}"
     assert tel["anomalies"]["braking_rf_drop_m"] < 0.15, f"Braking drop too high: {tel}"
     assert tel["anomalies"]["max_post_stop_speed_m_s"] < 0.10, f"Post-stop speed too high: {tel}"
+
+
+def test_maze_a_occlusion_recovery_and_corridor_move_maintain_wall_clearance():
+    from robot_sim.arenas import resolve_arena_model
+
+    app = SimulationApp(model_path=resolve_arena_model("maze_a"))
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    raw_call = lambda path, method="GET", payload=None: robot_ctl._call_bridge(url, path, method, payload)
+    stop_evt = threading.Event()
+    holder: dict = {"min_rf": 99.0, "near_count": 0}
+    err_holder: list[BaseException] = []
+
+    def tracked_call_fn(path: str, method: str = "GET", payload: dict | None = None) -> dict:
+        res = raw_call(path, method, payload)
+        if path.startswith("/status") and isinstance(res, dict) and "sensors" in res:
+            rf = res["sensors"]["rangefinders_m"]
+            cur_min = min(float(v) for v in rf.values())
+            holder["min_rf"] = min(holder["min_rf"], cur_min)
+            if cur_min < 0.12:
+                holder["near_count"] += 1
+            if "debug" in res:
+                res = {k: v for k, v in res.items() if k != "debug"}
+        return res
+
+    def worker():
+        try:
+            holder["scan"] = scan_for_target(
+                tracked_call_fn, max_degrees=360.0, direction="left", recover_occlusion=True
+            )
+            holder["move"] = closed_loop_move(tracked_call_fn, meters=1.5, speed_m_s=0.35, include_vision=True)
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=12)
+            time.sleep(0.004)
+        t.join(timeout=30.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    assert holder["scan"]["occlusion_recovered"] is True
+    assert holder["near_count"] == 0, f"Unexpected near-collision events: {holder['near_count']}"
+    assert holder["min_rf"] >= 0.135, f"Wall/corner clearance too tight: min_rf={holder['min_rf']:.4f}m"
+
+
+def _run_explore_and_approach(arena_name: str, rule: str, **explore_kwargs) -> tuple[dict, dict, dict]:
+    from robot_sim.arenas import resolve_arena_model
+
+    app = SimulationApp(model_path=resolve_arena_model(arena_name))
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    raw_call = lambda path, method="GET", payload=None: robot_ctl._call_bridge(url, path, method, payload)
+    stop_evt = threading.Event()
+    holder: dict = {"min_rf": 99.0, "near_count": 0}
+    err_holder: list[BaseException] = []
+
+    def tracked_call_fn(path: str, method: str = "GET", payload: dict | None = None) -> dict:
+        res = raw_call(path, method, payload)
+        if path.startswith("/status") and isinstance(res, dict) and "sensors" in res:
+            rf = res["sensors"]["rangefinders_m"]
+            vis = res.get("vision", {})
+            t_vis = bool(vis.get("target_visible", False))
+            t_obj = vis.get("target")
+            t_off = float(t_obj["offset_x"]) if (t_vis and isinstance(t_obj, dict)) else None
+            facing_target = t_vis and t_off is not None and abs(t_off) < 0.28
+            cur_min = min(float(v) for v in rf.values())
+            if not facing_target:
+                holder["min_rf"] = min(holder["min_rf"], cur_min)
+                if cur_min < 0.12:
+                    holder["near_count"] += 1
+            if "debug" in res:
+                res = {k: v for k, v in res.items() if k != "debug"}
+        return res
+
+    def worker():
+        try:
+            exp_res = explore_maze(tracked_call_fn, rule=rule, **explore_kwargs)
+            holder["exp_res"] = exp_res
+            if exp_res["target_found"]:
+                holder["app_res"] = approach_target(tracked_call_fn, stop_distance=0.25, max_steps=120)
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=12)
+            time.sleep(0.004)
+        t.join(timeout=60.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    return holder["exp_res"], holder.get("app_res", {}), holder
+
+
+@pytest.mark.parametrize("rule", ["right", "left"])
+def test_explore_maze_solves_maze_a_with_zero_near_collisions(rule):
+    exp_res, app_res, stats = _run_explore_and_approach("maze_a", rule, max_steps=400, speed_m_s=0.36)
+    assert exp_res["target_found"] is True, f"explore_maze(rule={rule}) failed to find target: {exp_res}"
+    assert "debug" not in exp_res["after_status"]
+    assert app_res["reached"] is True, f"approach_target after explore failed: {app_res}"
+    assert "debug" not in app_res["after_status"]
+    assert stats["near_count"] == 0, f"Near-collision events={stats['near_count']} (min_rf={stats['min_rf']:.4f}m)"
+    assert stats["min_rf"] >= 0.12, f"Wall clearance too tight: min_rf={stats['min_rf']:.4f}m"
+
+
+@pytest.mark.parametrize("rule", ["right", "left"])
+def test_explore_maze_solves_maze_b_with_zero_near_collisions(rule):
+    exp_res, app_res, stats = _run_explore_and_approach("maze_b", rule)
+    assert exp_res["target_found"] is True, f"explore_maze(maze_b, rule={rule}) failed: {exp_res}"
+    max_steps_bound = 560 if rule == "right" else 830
+    assert exp_res["steps"] <= max_steps_bound, f"Too many explore steps on maze_b ({rule}): {exp_res['steps']}"
+    assert "debug" not in exp_res["after_status"]
+    assert app_res["reached"] is True, f"approach_target on maze_b ({rule}) failed: {app_res}"
+    assert "debug" not in app_res["after_status"]
+    end_st = app_res["after_status"]
+    max_sim_time_s = 145.0 if rule == "right" else 255.0
+    assert float(end_st["sim_time"]) <= max_sim_time_s, f"maze_b ({rule}) sim_time too slow: {end_st['sim_time']}s"
+    assert end_st["vision"]["target_visible"] is True
+    assert abs(float(end_st["vision"]["target"]["offset_x"])) < 0.20
+    assert 0.15 <= float(end_st["sensors"]["rangefinders_m"]["center"]) <= 0.35
+    assert stats["near_count"] == 0, f"Near-collision events={stats['near_count']} (min_rf={stats['min_rf']:.4f}m)"
+    assert stats["min_rf"] >= 0.12, f"Wall clearance too tight: min_rf={stats['min_rf']:.4f}m"
+
+
+def test_explore_maze_solves_maze_c_with_zero_near_collisions():
+    exp_res, app_res, stats = _run_explore_and_approach("maze_c", "right")
+    assert exp_res["target_found"] is True, f"explore_maze(maze_c, rule=right) failed: {exp_res}"
+    assert "debug" not in exp_res["after_status"]
+    assert app_res["reached"] is True, f"approach_target on maze_c failed: {app_res}"
+    assert "debug" not in app_res["after_status"]
+    end_st = app_res["after_status"]
+    assert end_st["vision"]["target_visible"] is True
+    assert abs(float(end_st["vision"]["target"]["offset_x"])) < 0.20
+    assert 0.15 <= float(end_st["sensors"]["rangefinders_m"]["center"]) <= 0.35
+    assert stats["near_count"] == 0, f"Near-collision events={stats['near_count']} (min_rf={stats['min_rf']:.4f}m)"
+    assert stats["min_rf"] >= 0.12, f"Wall clearance too tight: min_rf={stats['min_rf']:.4f}m"

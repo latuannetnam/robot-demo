@@ -17,6 +17,10 @@ def test_model_loads_and_named_elements_exist():
         "rf_left",
         "rf_center",
         "rf_right",
+        "rf_left90",
+        "rf_right90",
+        "rf_left120",
+        "rf_right120",
         "left_wheel_vel",
         "right_wheel_vel",
         "chassis_vel",
@@ -59,6 +63,14 @@ def test_rangefinder_points_forward_and_front_cam_renders():
     rf_center_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, "rf_center")
     rf_center_adr = model.sensor_adr[rf_center_id]
     assert 0.55 < data.sensordata[rf_center_adr] < 0.90
+
+    # Side rangefinders (±90° and ±120°) must clear the robot's own wheels/chassis to arena_2wheel walls
+    for rf_name in ("rf_left90", "rf_right90"):
+        rf_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, rf_name)
+        assert 1.85 < data.sensordata[model.sensor_adr[rf_id]] < 1.95
+    for rf_name in ("rf_left120", "rf_right120"):
+        rf_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, rf_name)
+        assert 2.10 < data.sensordata[model.sensor_adr[rf_id]] < 2.30
 
     renderer = mujoco.Renderer(model, height=480, width=640)
     try:

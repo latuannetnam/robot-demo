@@ -153,12 +153,12 @@ def record_telemetry(
 
                 if prev_moving and not moving:
                     post_stop_window = 3
-                    rf_at_stop_onset = prev_rf_center
-                    xy_at_stop_onset = prev_xy
-                    yaw_at_stop_onset = prev_yaw_deg
-
-                if (
-                    post_stop_window > 0
+                    rf_at_stop_onset = rf_c
+                    xy_at_stop_onset = end_xy
+                    yaw_at_stop_onset = end_yaw_deg
+                elif (
+                    not moving
+                    and post_stop_window > 0
                     and rf_at_stop_onset is not None
                     and xy_at_stop_onset is not None
                     and end_xy is not None
@@ -169,8 +169,8 @@ def record_telemetry(
                         if (end_yaw_deg is not None and yaw_at_stop_onset is not None)
                         else 0.0
                     )
-                    if drift < 0.06 and yaw_drift < 5.0:
-                        drop = rf_at_stop_onset - rf_c
+                    if drift < 0.35 and yaw_drift < 3.0:
+                        drop = min(rf_at_stop_onset - rf_c, drift + 0.02)
                         if drop > braking_rf_drop_m:
                             braking_rf_drop_m = drop
                     post_stop_window -= 1

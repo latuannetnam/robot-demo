@@ -13,6 +13,7 @@ from robot_sim.skills import (
     approach_target,
     closed_loop_move,
     closed_loop_turn,
+    explore_maze,
     scan_for_target,
     wait_until_settled,
 )
@@ -198,6 +199,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_approach.add_argument("--max-steps", type=int, default=120, help="Số nhịp điều khiển tối đa (mặc định: 120)")
     p_approach.add_argument("--step-dt", type=float, default=0.15, help="Chu kỳ mỗi nhịp điều khiển (giây)")
 
+    p_explore = sub.add_parser("explore", help="Tự hành dò mê cung khép kín theo quy tắc bám tường (chuẩn Sim-to-Real)")
+    p_explore.add_argument("--rule", default="right", choices=["right", "left"], help="Quy tắc bám tường (right hoặc left)")
+    p_explore.add_argument("--max-steps", type=int, default=850, help="Số nhịp điều khiển tối đa (mặc định: 850)")
+    p_explore.add_argument("--speed", type=float, default=0.64, help="Tốc độ di chuyển hành lang (m/s, mặc định: 0.64)")
+    p_explore.add_argument("--step-dt", type=float, default=0.10, help="Chu kỳ mỗi nhịp điều khiển (giây)")
+
     sub.add_parser("stop", help="Dừng khẩn cấp hai động cơ bánh xe")
 
     p_reset = sub.add_parser("reset", help="Đưa robot và mục tiêu về trạng thái ban đầu")
@@ -346,6 +353,15 @@ def main(argv: list[str] | None = None) -> int:
                 call_fn,
                 stop_distance=args.stop_distance,
                 max_steps=args.max_steps,
+                step_dt=args.step_dt,
+            )
+        elif args.command == "explore":
+            call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
+            output = explore_maze(
+                call_fn,
+                rule=args.rule,
+                max_steps=args.max_steps,
+                speed_m_s=args.speed,
                 step_dt=args.step_dt,
             )
         elif args.command == "stop":

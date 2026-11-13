@@ -34,6 +34,12 @@
       <site name="site_rf_center" pos="0.125 0.00 0.075" zaxis="1 0 0" size="0.008" rgba="1 0.2 0.2 1"/>
       <site name="site_rf_left"   pos="0.125 0.06 0.075" zaxis="0.866025 0.5 0" size="0.008" rgba="1 0.2 0.2 1"/>
       <site name="site_rf_right"  pos="0.125 -0.06 0.075" zaxis="0.866025 -0.5 0" size="0.008" rgba="1 0.2 0.2 1"/>
+      <!-- Hai tia ngang ±90° đặt trước bánh xe (x=0.10 >= 0.095) để phát hiện tường/góc cua hai bên -->
+      <site name="site_rf_left90"  pos="0.10 0.10 0.075"  zaxis="0 1 0"  size="0.008" rgba="1 0.5 0.2 1"/>
+      <site name="site_rf_right90" pos="0.10 -0.10 0.075" zaxis="0 -1 0" size="0.008" rgba="1 0.5 0.2 1"/>
+      <!-- Hai tia chéo sau ±120° đặt trên cao (z=0.115 > 0.105) vượt khỏi bánh xe để bám chắc mép tường mỏng qua ngã rẽ -->
+      <site name="site_rf_left120"  pos="0.06 0.09 0.115"  zaxis="-0.5 0.866025 0"  size="0.008" rgba="1 0.7 0.2 1"/>
+      <site name="site_rf_right120" pos="0.06 -0.09 0.115" zaxis="-0.5 -0.866025 0" size="0.008" rgba="1 0.7 0.2 1"/>
 
       <!-- Bánh trái: gắn khớp bản lề xoay quanh trục Y -->
       <body name="left_wheel" pos="0.03 0.115 0.05">
@@ -53,16 +59,20 @@
 
   <!-- Cơ cấu chấp hành (Động cơ điều khiển vận tốc góc rad/s cho hai bánh xe) -->
   <actuator>
-    <velocity name="left_motor"  joint="left_wheel_joint"  kv="1.0" ctrlrange="-15 15" forcerange="-2.5 2.5"/>
-    <velocity name="right_motor" joint="right_wheel_joint" kv="1.0" ctrlrange="-15 15" forcerange="-2.5 2.5"/>
+    <velocity name="left_motor"  joint="left_wheel_joint"  kv="1.2" ctrlrange="-15 15" forcerange="-2.5 2.5"/>
+    <velocity name="right_motor" joint="right_wheel_joint" kv="1.2" ctrlrange="-15 15" forcerange="-2.5 2.5"/>
   </actuator>
 
   <!-- Hệ thống cảm biến gắn trên xe (tương ứng cảm biến trên robot phần cứng thật) -->
   <sensor>
-    <!-- 3 tia đo khoảng cách phía trước (tối đa 3.0m; trả về -1 nếu không gặp vật cản) -->
+    <!-- 5 tia đo khoảng cách (3 tia trước + 2 tia ngang ±90°; tối đa 3.0m; trả về -1 nếu không gặp vật cản) -->
     <rangefinder name="rf_left"   site="site_rf_left"   cutoff="3.0"/>
     <rangefinder name="rf_center" site="site_rf_center" cutoff="3.0"/>
     <rangefinder name="rf_right"  site="site_rf_right"  cutoff="3.0"/>
+    <rangefinder name="rf_left90"  site="site_rf_left90"  cutoff="3.0"/>
+    <rangefinder name="rf_right90" site="site_rf_right90" cutoff="3.0"/>
+    <rangefinder name="rf_left120"  site="site_rf_left120"  cutoff="3.0"/>
+    <rangefinder name="rf_right120" site="site_rf_right120" cutoff="3.0"/>
 
     <!-- Encoder đo tốc độ quay thực tế của hai bánh xe (rad/s) -->
     <jointvel name="left_wheel_vel"  joint="left_wheel_joint"/>
