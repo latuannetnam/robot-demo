@@ -525,4 +525,42 @@ def test_explore_maze_solves_maze_c_with_zero_near_collisions():
     assert abs(float(end_st["vision"]["target"]["offset_x"])) < 0.20
     assert 0.15 <= float(end_st["sensors"]["rangefinders_m"]["center"]) <= 0.35
     assert stats["near_count"] == 0, f"Near-collision events={stats['near_count']} (min_rf={stats['min_rf']:.4f}m)"
-    assert stats["min_rf"] >= 0.12, f"Wall clearance too tight: min_rf={stats['min_rf']:.4f}m"
+    assert stats["min_rf"] >= 0.16, f"Wall clearance too tight: min_rf={stats['min_rf']:.4f}m"
+
+
+def test_scan_360_no_recover_stops_without_large_overshoot():
+    from robot_sim.arenas import resolve_arena_model
+
+    app = SimulationApp(model_path=resolve_arena_model("maze_c"))
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    call_fn = lambda path, method="GET", payload=None: robot_ctl._call_bridge(url, path, method, payload)
+    stop_evt = threading.Event()
+    holder: dict = {}
+    err_holder: list[BaseException] = []
+
+    def worker():
+        try:
+            holder["scan"] = scan_for_target(
+                call_fn, max_degrees=360.0, direction="left", recover_occlusion=False
+            )
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=12)
+            time.sleep(0.004)
+        t.join(timeout=15.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    assert holder["scan"]["target_found"] is False
+    assert 356.0 <= holder["scan"]["scanned_degrees"] <= 363.0

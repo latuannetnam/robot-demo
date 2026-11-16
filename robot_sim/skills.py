@@ -458,10 +458,24 @@ def scan_for_target(
                 found = True
                 last_seen_offset_x = float(vis["target"]["offset_x"])
                 break
-            if scanned_deg >= max_degrees:
+            rem_deg = max_degrees - scanned_deg
+            yaw_rate_deg_s = abs(math.degrees(float(st["sensors"].get("yaw_rate_rad_s", 0.0))))
+            if rem_deg <= max(0.8, 0.045 * yaw_rate_deg_s):
                 break
 
-            call_fn("/wheels", "POST", {"left": round(left_w, 4), "right": round(right_w, 4), "duration": 0.55})
+            eff_deg_s = angular_speed_deg_s
+            pulse_dur = 0.55
+            if rem_deg < 28.0:
+                eff_deg_s = min(angular_speed_deg_s, max(18.0, 2.5 * rem_deg))
+                pulse_dur = min(0.55, max(0.03, (0.85 * rem_deg) / max(18.0, eff_deg_s)))
+            eff_omega = min((math.radians(eff_deg_s) * TRACK_WIDTH) / (2.0 * WHEEL_RADIUS), MAX_WHEEL_RAD_S)
+            cur_left_w, cur_right_w = (-eff_omega, eff_omega) if direction == "left" else (eff_omega, -eff_omega)
+
+            call_fn(
+                "/wheels",
+                "POST",
+                {"left": round(cur_left_w, 4), "right": round(cur_right_w, 4), "duration": round(pulse_dur, 4)},
+            )
             time.sleep(0.006)
             st = call_fn("/status?vision=1", "GET", None)
             scanned_deg = abs(float(st["sensors"]["gyro_yaw_deg"]) - start_gyro_deg)
@@ -764,18 +778,22 @@ def approach_target(
                 r_flank = min(rf_r90, rf_r120 + 0.04)
                 if l_flank < 0.38:
                     rf_repel += 6.5 * ((0.38 - l_flank) / 0.38)
-                    side_close = side_close or (l_flank < 0.30)
+                    if l_flank < 0.23:
+                        rf_repel += 6.0 * ((0.23 - l_flank) / 0.23)
+                    side_close = side_close or (l_flank < 0.28)
                 if r_flank < 0.38:
                     rf_repel -= 6.5 * ((0.38 - r_flank) / 0.38)
-                    side_close = side_close or (r_flank < 0.30)
+                    if r_flank < 0.23:
+                        rf_repel -= 6.0 * ((0.23 - r_flank) / 0.23)
+                    side_close = side_close or (r_flank < 0.28)
                 l_wall_d = min(rf_l90, rf_l120 + 0.08)
                 r_wall_d = min(rf_r90, rf_r120 + 0.08)
-                if l_wall_d < 0.28 and attract_steer < 0.0:
-                    attract_steer *= max(0.0, (l_wall_d - 0.18) / 0.10)
-                    side_close = side_close or (l_wall_d < 0.24)
-                if r_wall_d < 0.28 and attract_steer > 0.0:
-                    attract_steer *= max(0.0, (r_wall_d - 0.18) / 0.10)
-                    side_close = side_close or (r_wall_d < 0.24)
+                if l_wall_d < 0.31 and attract_steer < 0.0:
+                    attract_steer *= max(0.0, (l_wall_d - 0.21) / 0.10)
+                    side_close = True
+                if r_wall_d < 0.31 and attract_steer > 0.0:
+                    attract_steer *= max(0.0, (r_wall_d - 0.21) / 0.10)
+                    side_close = True
 
             if not target_is_close_center and rf_c < 0.65:
                 if abs(vis_repel) > 0.25:
@@ -1075,6 +1093,47 @@ def explore_maze(
                         release_stop=False,
                     )["after_status"]
                     rf = settled["sensors"]["rangefinders_m"]
+                    rf_l = float(rf["left"])
+                    rf_c = float(rf["center"])
+                    rf_r = float(rf["right"])
+                    rf_l90 = float(rf.get("left90", 3.0))
+                    rf_r90 = float(rf.get("right90", 3.0))
+                    pref_90 = rf_r90 if pref_is_right else rf_l90
+                    other_90 = rf_l90 if pref_is_right else rf_r90
+
+                if has_hw_odom and (pref_90 > 0.52 or other_90 > 0.52) and rf_c > 0.34 and min(rf_l, rf_r) > 0.31:
+                    nudge_target_odom = float(settled["sensors"].get("odom_dist_m", odom_m)) + min(0.06, rf_c - 0.30)
+                    nudge_deadline = time.monotonic() + 1.5
+                    while time.monotonic() < nudge_deadline:
+                        n_rf = settled["sensors"]["rangefinders_m"]
+                        n_odom = float(settled["sensors"].get("odom_dist_m", odom_m))
+                        if (
+                            n_odom >= nudge_target_odom - 0.008
+                            or float(n_rf["center"]) <= 0.29
+                            or min(float(n_rf["left"]), float(n_rf["right"])) <= 0.26
+                        ):
+                            break
+                        n_yaw_err = _wrap_angle_deg(corridor_yaw_deg - float(settled["sensors"]["gyro_yaw_deg"]))
+                        n_trim = max(-1.2, min(1.2, 0.22 * n_yaw_err))
+                        call_fn(
+                            "/wheels",
+                            "POST",
+                            {"left": round(4.4 - n_trim, 4), "right": round(4.4 + n_trim, 4), "duration": 0.14},
+                        )
+                        time.sleep(0.015)
+                        settled = call_fn("/status?vision=1", "GET", None)
+                        if settled["vision"].get("target_visible"):
+                            done = _finish_target_seen(settled["vision"])
+                            if done is not None:
+                                stopped_cleanly = True
+                                return done
+                    settled = _fast_settle(include_vision=True)
+                    if settled["vision"].get("target_visible"):
+                        done = _finish_target_seen(settled["vision"])
+                        if done is not None:
+                            stopped_cleanly = True
+                            return done
+                    rf = settled["sensors"]["rangefinders_m"]
                     rf_l90 = float(rf.get("left90", 3.0))
                     rf_r90 = float(rf.get("right90", 3.0))
                     pref_90 = rf_r90 if pref_is_right else rf_l90
@@ -1183,7 +1242,7 @@ def explore_maze(
                 "POST",
                 {"left": round(left_w, 4), "right": round(right_w, 4), "duration": cmd_dur},
             )
-            target_wall_dt = min(0.030, step_dt * 0.9) if not has_rate_estimate else (step_dt * 0.9) / sim_per_wall
+            target_wall_dt = min(0.045, step_dt * 1.35) if not has_rate_estimate else (step_dt * 1.35) / sim_per_wall
             time.sleep(max(0.002, target_wall_dt - (time.perf_counter() - t_iter_wall)))
 
         settled = _stop_and_settle(call_fn, include_vision=True)

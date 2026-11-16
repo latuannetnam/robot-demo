@@ -125,6 +125,8 @@ class RobotSimulation:
         self._clean_vis_opt.flags[mujoco.mjtVisFlag.mjVIS_RANGEFINDER] = 0
 
         self._sensor_adr, self._rangefinders = _discover_sensors(self.model)
+        self._state_epoch: int = 0
+        self._vision_cache: dict[str, tuple[tuple, dict]] = {}
         mujoco.mj_forward(self.model, self.data)
 
     def close(self) -> None:
@@ -187,6 +189,8 @@ class RobotSimulation:
         self._command_deadline = None
         self._gyro_yaw_rad = 0.0
         self._odom_dist_m = 0.0
+        self._state_epoch += 1
+        self._vision_cache.clear()
         return self.get_status()
 
     def _get_renderer(self, width: int, height: int) -> mujoco.Renderer:
@@ -302,6 +306,8 @@ class RobotSimulation:
         self._command_deadline = None
         self._gyro_yaw_rad = 0.0
         self._odom_dist_m = 0.0
+        self._state_epoch += 1
+        self._vision_cache.clear()
         mujoco.mj_forward(self.model, self.data)
         return self.get_status()
 
@@ -309,6 +315,7 @@ class RobotSimulation:
         if self._command_deadline is not None and self.data.time >= self._command_deadline:
             self.stop()
         mujoco.mj_step(self.model, self.data)
+        self._state_epoch += 1
         gyro_z = float(self.data.sensordata[self._sensor_adr["chassis_gyro"] + 2])
         fwd_v = float(self.data.sensordata[self._sensor_adr["chassis_vel"]])
         dt = float(self.model.opt.timestep)
@@ -384,7 +391,7 @@ class RobotSimulation:
             },
         }
         if include_vision:
-            result["vision"] = self.analyze_vision("front_cam")
+            result["vision"] = self.analyze_vision("front_cam", _forward=False)
         return result
 
     def _validate_camera_name(self, camera_name: str) -> None:
@@ -416,11 +423,26 @@ class RobotSimulation:
             "area_pct": round(area_pct, 2),
         }
 
-    def analyze_vision(self, camera_name: str = "front_cam") -> dict:
+    def analyze_vision(self, camera_name: str = "front_cam", *, _forward: bool = True) -> dict:
         """Phân tích trực tiếp khung hình camera trong RAM (không ghi đĩa) để trích xuất đích xanh & vật cản."""
         self._validate_camera_name(camera_name)
+        pose_sig = (
+            self._state_epoch,
+            tuple(round(float(x), 7) for x in self.data.qpos[:7]),
+            tuple(round(float(x), 7) for x in self.data.mocap_pos[0]),
+        )
+        cached = self._vision_cache.get(camera_name)
+        if cached is not None and cached[0] == pose_sig:
+            data = cached[1]
+            return {
+                **data,
+                "target": dict(data["target"]) if data["target"] is not None else None,
+                "obstacles": [dict(obs) for obs in data["obstacles"]],
+            }
+
         width, height = DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT
-        mujoco.mj_forward(self.model, self.data)
+        if _forward:
+            mujoco.mj_forward(self.model, self.data)
         renderer = self._get_renderer(width=width, height=height)
         renderer.update_scene(self.data, camera=camera_name, scene_option=self._clean_vis_opt)
         arr = renderer.render().astype(np.int16)
@@ -439,7 +461,7 @@ class RobotSimulation:
                 obstacles.append({"color": color_name, **summary})
         obstacles.sort(key=lambda item: item["area_pct"], reverse=True)
 
-        return {
+        result = {
             "camera": camera_name,
             "width": width,
             "height": height,
@@ -447,6 +469,15 @@ class RobotSimulation:
             "target": target_info,
             "obstacles": obstacles,
         }
+        self._vision_cache[camera_name] = (
+            pose_sig,
+            {
+                **result,
+                "target": dict(target_info) if target_info is not None else None,
+                "obstacles": [dict(obs) for obs in obstacles],
+            },
+        )
+        return result
 
     def capture_camera(
         self,

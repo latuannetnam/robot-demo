@@ -5,22 +5,70 @@ import http.client
 import json
 import math
 from pathlib import Path
+import threading
 import time
 import urllib.error
-import urllib.request
+from urllib.parse import urlsplit
 
 from robot_sim.core import PROJECT_ROOT, _require_finite
 
 DEFAULT_TELEMETRY_PATH = PROJECT_ROOT / "captures" / "telemetry_latest.json"
 DEFAULT_STOP_FLAG_PATH = PROJECT_ROOT / "captures" / ".telemetry_stop"
+_THREAD_CONNS = threading.local()
 
 
-def _fetch_raw_status(base_url: str, timeout: float = 1.5) -> dict:
-    url = f"{base_url.rstrip('/')}/status?vision=1"
-    req = urllib.request.Request(url, method="GET", headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        parsed = json.loads(resp.read().decode("utf-8"))
-        return parsed.get("data", parsed)
+def _get_conn_pool() -> dict[tuple[str, str, int, float], http.client.HTTPConnection]:
+    pool = getattr(_THREAD_CONNS, "pool", None)
+    if pool is None:
+        pool = {}
+        _THREAD_CONNS.pool = pool
+    return pool
+
+
+def _fetch_raw_status(base_url: str, timeout: float = 4.0) -> dict:
+    parsed_url = urlsplit(base_url)
+    scheme = parsed_url.scheme.lower()
+    host = parsed_url.hostname or "127.0.0.1"
+    port = parsed_url.port or (443 if scheme == "https" else 80)
+    base_path = parsed_url.path.rstrip("/")
+    req_path = f"{base_path}/status?vision=1"
+    key = (scheme, host, port, float(timeout))
+    pool = _get_conn_pool()
+
+    for attempt in range(2):
+        conn = pool.get(key)
+        was_reused = conn is not None
+        if conn is None:
+            cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+            conn = cls(host, port, timeout=timeout)
+            pool[key] = conn
+        try:
+            conn.request("GET", req_path, headers={"Content-Type": "application/json", "Connection": "keep-alive"})
+            resp = conn.getresponse()
+            raw = resp.read()
+            if resp.status >= 400:
+                raise urllib.error.HTTPError(
+                    f"{base_url.rstrip('/')}/status?vision=1",
+                    resp.status,
+                    resp.reason,
+                    resp.headers,
+                    None,
+                )
+            if resp.will_close:
+                conn.close()
+                pool.pop(key, None)
+            parsed = json.loads(raw.decode("utf-8"))
+            return parsed.get("data", parsed)
+        except (http.client.HTTPException, TimeoutError, ConnectionError, OSError):
+            pool.pop(key, None)
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if was_reused and attempt == 0:
+                continue
+            raise
+    raise RuntimeError("Unexpected retry exit in _fetch_raw_status")
 
 
 def record_telemetry(

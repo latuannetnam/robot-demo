@@ -138,3 +138,59 @@ def test_telemetry_tracks_arena_and_all_dynamic_rangefinders(tmp_path: Path, mon
     assert summary["min_rangefinder_m"] == 0.08
     assert summary["near_collision_count"] == 1
 
+
+def test_fetch_raw_status_recovers_from_stale_keepalive_connection():
+    import json
+    import socket
+    from robot_sim.telemetry import _fetch_raw_status, _get_conn_pool
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+    url = f"http://127.0.0.1:{port}"
+    accepted = {"n": 0}
+
+    def server_worker():
+        # First connection returns valid HTTP/1.1 JSON, then closes socket before 2nd request arrives
+        c1, _ = srv.accept()
+        accepted["n"] += 1
+        c1.recv(1024)
+        body = json.dumps({"ok": True, "data": {"sim_time": 0.1}}).encode("utf-8")
+        c1.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+            + body
+        )
+        time.sleep(0.03)
+        c1.close()
+
+        # Second connection (transparent retry) serves fresh JSON cleanly
+        c2, _ = srv.accept()
+        accepted["n"] += 1
+        c2.recv(1024)
+        body2 = json.dumps({"ok": True, "data": {"sim_time": 0.2}}).encode("utf-8")
+        c2.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
+            + f"Content-Length: {len(body2)}\r\n\r\n".encode("ascii")
+            + body2
+        )
+        c2.close()
+        srv.close()
+
+    t = threading.Thread(target=server_worker, daemon=True)
+    t.start()
+    try:
+        _get_conn_pool().clear()
+        d1 = _fetch_raw_status(url)
+        time.sleep(0.06)
+        d2 = _fetch_raw_status(url)
+        t.join(timeout=2.0)
+    finally:
+        _get_conn_pool().clear()
+
+    assert d1["sim_time"] == 0.1
+    assert d2["sim_time"] == 0.2
+    assert accepted["n"] == 2
+
+

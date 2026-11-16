@@ -21,6 +21,7 @@ class SimulationApp:
     def __init__(self, model_path: Path | str | None = None) -> None:
         self.sim = RobotSimulation(model_path=model_path)
         self._cmd_queue: queue.Queue[tuple[Callable[[RobotSimulation], dict], queue.Queue]] = queue.Queue()
+        self._cmd_event = threading.Event()
         self._http_server: ThreadingHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
         self._viewer_reload_pending = False
@@ -31,6 +32,7 @@ class SimulationApp:
             return 503, {"ok": False, "error": "Máy chủ mô phỏng đã dừng."}
         resp_q: queue.Queue[tuple[int, dict]] = queue.Queue(maxsize=1)
         self._cmd_queue.put((fn, resp_q))
+        self._cmd_event.set()
         try:
             return resp_q.get(timeout=timeout)
         except queue.Empty:
@@ -59,6 +61,8 @@ class SimulationApp:
         app = self
 
         class RequestHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
             def log_message(self, format: str, *args: Any) -> None:
                 return  # Giữ terminal gọn gàng khi gọi liên tục
 
@@ -204,7 +208,10 @@ class SimulationApp:
 
                 self._send_json(code, payload)
 
-        self._http_server = ThreadingHTTPServer((host, port), RequestHandler)
+        class _KeepAliveHTTPServer(ThreadingHTTPServer):
+            daemon_threads = True
+
+        self._http_server = _KeepAliveHTTPServer((host, port), RequestHandler)
         bound_host, bound_port = self._http_server.server_address[:2]
         self._http_thread = threading.Thread(
             target=self._http_server.serve_forever,
@@ -225,14 +232,19 @@ class SimulationApp:
                 now = time.perf_counter()
                 if duration is not None and (now - start_wall) >= duration:
                     break
-                elapsed = min(max(0.0, now - last_wall), 0.10)
-                last_wall = now
-                steps = max(1, int(round(elapsed / dt))) if elapsed > 0 else 8
-                t0 = time.perf_counter()
+                self._cmd_event.clear()
+                raw_elapsed = max(0.0, now - last_wall)
+                if raw_elapsed >= 0.10:
+                    steps = int(round(0.10 / dt))
+                    last_wall = now
+                else:
+                    steps = int(raw_elapsed / dt)
+                    last_wall += steps * dt
                 self.tick_headless(step_batch=steps)
-                sleep_s = frame_dt - (time.perf_counter() - t0)
-                if sleep_s > 0:
-                    time.sleep(sleep_s)
+                next_step_at = last_wall + frame_dt
+                sleep_s = max(0.0, next_step_at - time.perf_counter())
+                if sleep_s > 0 and self._cmd_queue.empty():
+                    self._cmd_event.wait(timeout=sleep_s)
             return
 
         import mujoco.viewer
@@ -243,31 +255,42 @@ class SimulationApp:
             viewer.cam.elevation = -32.0
             viewer.cam.azimuth = 135.0
             last_wall = time.perf_counter()
+            last_sync = last_wall
 
             while viewer.is_running() and not self._closed:
                 now = time.perf_counter()
                 if duration is not None and (now - start_wall) >= duration:
                     break
-                elapsed = min(max(0.0, now - last_wall), 0.10)
-                last_wall = now
-                steps = max(1, int(round(elapsed / dt))) if elapsed > 0 else 8
-                t0 = time.perf_counter()
+                self._cmd_event.clear()
+                raw_elapsed = max(0.0, now - last_wall)
+                if raw_elapsed >= 0.10:
+                    steps = int(round(0.10 / dt))
+                    last_wall = now
+                else:
+                    steps = int(raw_elapsed / dt)
+                    last_wall += steps * dt
                 with viewer.lock():
                     self.process_pending_commands()
                     for _ in range(steps):
                         self.sim.step_once()
+                reloaded = False
                 if self._viewer_reload_pending:
                     self._viewer_reload_pending = False
+                    reloaded = True
                     raw_sim = viewer._get_sim()
                     if raw_sim is not None:
                         raw_sim.load(self.sim.model, self.sim.data, str(self.sim.model_path))
-                viewer.sync()
-                sleep_s = frame_dt - (time.perf_counter() - t0)
-                if sleep_s > 0:
-                    time.sleep(sleep_s)
+                if steps > 0 or reloaded or (now - last_sync) >= frame_dt:
+                    viewer.sync()
+                    last_sync = time.perf_counter()
+                next_step_at = last_wall + frame_dt
+                sleep_s = max(0.0, next_step_at - time.perf_counter())
+                if sleep_s > 0 and self._cmd_queue.empty():
+                    self._cmd_event.wait(timeout=sleep_s)
 
     def shutdown(self) -> None:
         self._closed = True
+        self._cmd_event.set()
         while True:
             try:
                 _, resp_q = self._cmd_queue.get_nowait()

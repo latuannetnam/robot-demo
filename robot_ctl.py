@@ -5,9 +5,9 @@ import http.client
 import json
 from pathlib import Path
 import sys
+import threading
 import time
-import urllib.error
-import urllib.request
+from urllib.parse import urlsplit
 
 from robot_sim.skills import (
     approach_target,
@@ -35,36 +35,72 @@ class BridgeRequestError(RuntimeError):
     pass
 
 
+_BRIDGE_CONNS = threading.local()
+
+
+def _get_bridge_pool() -> dict[tuple[str, str, int], http.client.HTTPConnection]:
+    pool = getattr(_BRIDGE_CONNS, "pool", None)
+    if pool is None:
+        pool = {}
+        _BRIDGE_CONNS.pool = pool
+    return pool
+
+
 def _call_bridge(base_url: str, path: str, method: str = "GET", payload: dict | None = None) -> dict:
     if not isinstance(base_url, str) or not base_url.startswith(("http://", "https://")):
         raise BridgeRequestError(
             f"Địa chỉ --url không hợp lệ ('{base_url}'). Cần bắt đầu bằng http:// hoặc https:// (ví dụ: {DEFAULT_URL})."
         )
-    url = f"{base_url.rstrip('/')}{path}"
+    parsed_url = urlsplit(base_url)
+    scheme = parsed_url.scheme.lower()
+    host = parsed_url.hostname or "127.0.0.1"
+    port = parsed_url.port or (443 if scheme == "https" else 80)
+    base_path = parsed_url.path.rstrip("/")
+    req_path = f"{base_path}{path}"
     raw_body = None if payload is None else json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=raw_body,
-        method=method,
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=6.0) as resp:
-            parsed = json.loads(resp.read().decode("utf-8"))
-            return parsed.get("data", parsed)
-    except urllib.error.HTTPError as exc:
+    headers = {"Content-Type": "application/json", "Connection": "keep-alive"}
+    pool = _get_bridge_pool()
+    key = (scheme, host, port)
+
+    for attempt in range(2):
+        conn = pool.get(key)
+        was_reused = conn is not None
+        if conn is None:
+            cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+            conn = cls(host, port, timeout=6.0)
+            pool[key] = conn
         try:
-            err_json = json.loads(exc.read().decode("utf-8"))
-            msg = err_json.get("error", str(exc))
-        except Exception:
-            msg = str(exc)
-        raise BridgeRequestError(msg) from exc
-    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError, OSError) as exc:
-        raise BridgeOfflineError(
-            f"Không kết nối được hoặc mất kết nối tới mô phỏng tại {base_url}.\n"
-            "Hãy mở một cửa sổ terminal khác và khởi chạy cửa sổ 3D MuJoCo trước bằng lệnh:\n"
-            "  uv run python sim_server.py"
-        ) from exc
+            conn.request(method, req_path, body=raw_body, headers=headers)
+            resp = conn.getresponse()
+            resp_bytes = resp.read()
+            if resp.will_close:
+                conn.close()
+                pool.pop(key, None)
+            if resp.status >= 400:
+                try:
+                    err_json = json.loads(resp_bytes.decode("utf-8"))
+                    msg = err_json.get("error", f"HTTP {resp.status} {resp.reason}")
+                except Exception:
+                    msg = f"HTTP {resp.status} {resp.reason}"
+                raise BridgeRequestError(msg)
+            parsed = json.loads(resp_bytes.decode("utf-8"))
+            return parsed.get("data", parsed)
+        except BridgeRequestError:
+            raise
+        except (http.client.HTTPException, TimeoutError, ConnectionError, OSError) as exc:
+            pool.pop(key, None)
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if was_reused and attempt == 0:
+                continue
+            raise BridgeOfflineError(
+                f"Không kết nối được hoặc mất kết nối tới mô phỏng tại {base_url}.\n"
+                "Hãy mở một cửa sổ terminal khác và khởi chạy cửa sổ 3D MuJoCo trước bằng lệnh:\n"
+                "  uv run python sim_server.py"
+            ) from exc
+    raise BridgeOfflineError(f"Không kết nối được tới mô phỏng tại {base_url}.")
 
 
 def _strip_debug(status_data: dict, keep_debug: bool) -> dict:

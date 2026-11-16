@@ -287,4 +287,25 @@ def test_reload_cross_arena_explicit_preserve_target_rejects_wall_overlapping_pr
         sim.close()
 
 
+def test_analyze_vision_caches_same_state_and_invalidates_on_pose_change():
+    sim = RobotSimulation()
+    try:
+        sim.reset(target_xy=(0.8, 0.0))
+        v1 = sim.analyze_vision("front_cam")
+        assert v1["target_visible"] is True
+
+        # Mutating returned dict must not corrupt cached entry
+        v1["target"]["offset_x"] = 999.0
+        v2 = sim.analyze_vision("front_cam")
+        assert abs(v2["target"]["offset_x"]) < 0.1
+
+        # Direct mocap/qpos update invalidates cache immediately
+        sim.data.mocap_pos[0] = [-0.8, 0.0, float(sim.data.mocap_pos[0][2])]
+        v3 = sim.analyze_vision("front_cam")
+        assert v3["target_visible"] is False
+    finally:
+        sim.close()
+
+
+
 
