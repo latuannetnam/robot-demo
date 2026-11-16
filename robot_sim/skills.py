@@ -911,17 +911,27 @@ def explore_maze(
         raise ValueError("Chu kỳ điều khiển 'step_dt' phải nằm trong đoạn [0.03, 0.5] giây.")
 
     pref_is_right = rule == "right"
+    pref_turn_deg = -90.0 if pref_is_right else 90.0
+    other_turn_deg = -pref_turn_deg
     max_speed = min(abs(float(speed_m_s)), MAX_WHEEL_RAD_S * WHEEL_RADIUS)
     watchdog_dur = round(max(0.34, step_dt * 3.2), 3)
 
     st = call_fn("/status?vision=1", "GET", None)
     corridor_yaw_deg = float(st["sensors"]["gyro_yaw_deg"])
+    base_yaw_deg = corridor_yaw_deg
+    prev_gyro_yaw_deg = corridor_yaw_deg
     has_hw_odom = "odom_dist_m" in st["sensors"]
+    has_hw_odom_xy = ("odom_x_m" in st["sensors"]) and ("odom_y_m" in st["sensors"])
     odom_m = float(st["sensors"].get("odom_dist_m", 0.0))
+    odom_x = float(st["sensors"].get("odom_x_m", 0.0))
+    odom_y = float(st["sensors"].get("odom_y_m", 0.0))
     last_turn_odom_m = odom_m - 0.50
     saw_pref_wall = False
     wall_edge_odom_m = odom_m
     open_branch_streak = 0
+    saw_other_wall = False
+    other_wall_edge_odom_m = odom_m
+    other_branch_streak = 0
     branch_turn_odom_m: float | None = None
     turns_taken = 0
     steps_taken = 0
@@ -933,8 +943,81 @@ def explore_maze(
     prev_sim_t = float(st.get("sim_time", 0.0))
     stopped_cleanly = False
 
+    breadcrumbs: list[tuple[float, float, float, int]] = []
+    last_crumb_odom = -999.0
+    loop_mode = False
+
+    def _heading_idx(yaw_deg: float) -> int:
+        return int(round((yaw_deg - base_yaw_deg) / 90.0)) % 4
+
+    def _sync_odom(cur_st: dict) -> None:
+        nonlocal odom_m, odom_x, odom_y, prev_sim_t, prev_gyro_yaw_deg, last_crumb_odom, loop_mode
+        cur_sim = float(cur_st.get("sim_time", prev_sim_t))
+        dt_s = max(0.0, cur_sim - prev_sim_t)
+        prev_sim_t = cur_sim
+        sens = cur_st["sensors"]
+        cur_gyro = float(sens.get("gyro_yaw_deg", corridor_yaw_deg))
+        prev_odom = odom_m
+        if has_hw_odom and "odom_dist_m" in sens:
+            odom_m = float(sens["odom_dist_m"])
+            delta_d = odom_m - prev_odom
+        else:
+            fwd_v = float(sens.get("forward_speed_m_s", 0.0))
+            delta_d = fwd_v * dt_s
+            odom_m += abs(delta_d)
+        if has_hw_odom_xy and "odom_x_m" in sens and "odom_y_m" in sens:
+            odom_x = float(sens["odom_x_m"])
+            odom_y = float(sens["odom_y_m"])
+        else:
+            mid_yaw_rad = math.radians(0.5 * (prev_gyro_yaw_deg + cur_gyro))
+            odom_x += delta_d * math.cos(mid_yaw_rad)
+            odom_y += delta_d * math.sin(mid_yaw_rad)
+        prev_gyro_yaw_deg = cur_gyro
+
+        h_idx = _heading_idx(corridor_yaw_deg)
+        if not loop_mode:
+            for bx, by, bodom, bhead in breadcrumbs:
+                if bhead == h_idx and (odom_m - bodom) >= 2.2 and math.hypot(odom_x - bx, odom_y - by) <= 0.28:
+                    loop_mode = True
+                    break
+        if (odom_m - last_crumb_odom) >= 0.14:
+            breadcrumbs.append((odom_x, odom_y, odom_m, h_idx))
+            last_crumb_odom = odom_m
+
+    def _probe_xy(
+        delta_deg: float,
+        dist_m: float = 0.76,
+        origin_xy: tuple[float, float] | None = None,
+    ) -> tuple[float, float]:
+        ox, oy = (odom_x, odom_y) if origin_xy is None else origin_xy
+        ang = math.radians(corridor_yaw_deg + delta_deg)
+        return ox + dist_m * math.cos(ang), oy + dist_m * math.sin(ang)
+
+    def _min_crumb_dist(px: float, py: float) -> float:
+        if not breadcrumbs:
+            return 99.0
+        return min(math.hypot(px - bx, py - by) for bx, by, _, _ in breadcrumbs)
+
+    def _dir_visit_count(px: float, py: float, delta_deg: float) -> int:
+        target_h = _heading_idx(corridor_yaw_deg + delta_deg)
+        cnt = 0
+        last_matched_odom = -999.0
+        for bx, by, bodom, bhead in breadcrumbs:
+            if bhead == target_h and (bodom - last_matched_odom) >= 1.4 and math.hypot(px - bx, py - by) <= 0.36:
+                cnt += 1
+                last_matched_odom = bodom
+        return cnt
+
+    def _option_rank(delta_deg: float, tie_prio: int) -> tuple[int, int, int]:
+        px, py = _probe_xy(delta_deg, 0.76)
+        unvisited = 1 if _min_crumb_dist(px, py) >= 0.44 else 0
+        d_visits = _dir_visit_count(px, py, delta_deg)
+        return (unvisited, -d_visits, tie_prio)
+
+    _sync_odom(st)
+
     def _fast_settle(include_vision: bool = True) -> dict:
-        return _settle_at_zero_hold(
+        settled_st = _settle_at_zero_hold(
             call_fn,
             include_vision=include_vision,
             speed_tol=0.07,
@@ -942,10 +1025,13 @@ def explore_maze(
             settle_samples=1,
             max_wait_s=0.18,
         )
+        _sync_odom(settled_st)
+        return settled_st
 
     def _finish_target_seen(cur_vis: dict) -> dict | None:
         last_off = float(cur_vis["target"]["offset_x"])
         settled_end = _stop_and_settle(call_fn, include_vision=True)
+        _sync_odom(settled_end)
         if not settled_end["vision"]["target_visible"]:
             rec_deg = -math.degrees(math.atan(last_off * FRONT_CAM_TAN_HALF_FOVX))
             if abs(rec_deg) >= 0.8:
@@ -957,6 +1043,7 @@ def explore_maze(
                     include_vision=True,
                     release_stop=True,
                 )["after_status"]
+                _sync_odom(settled_end)
         if settled_end["vision"]["target_visible"]:
             return {
                 "target_found": True,
@@ -964,6 +1051,7 @@ def explore_maze(
                 "rule": rule,
                 "steps": steps_taken,
                 "turns": turns_taken,
+                "loop_escaped": bool(loop_mode),
                 "after_status": _clean_status(settled_end),
             }
         return None
@@ -975,6 +1063,8 @@ def explore_maze(
         cur_rf = cur_st["sensors"]["rangefinders_m"]
         t_off = abs(float(cur_vis["target"]["offset_x"]))
         t_area = float(cur_vis["target"]["area_pct"])
+        if t_off >= 0.72 and t_area < 0.85:
+            return None
         c_dist = float(cur_rf["center"])
         flank_min = min(float(cur_rf.get("left90", 3.0)), float(cur_rf.get("right90", 3.0)))
         if t_off < 0.32 or t_area >= 2.8 or c_dist < 0.80 or flank_min >= 0.50:
@@ -982,8 +1072,8 @@ def explore_maze(
         return None
 
     def _aligned_turn(cur_st: dict, nominal_deg: float) -> dict:
-        nonlocal corridor_yaw_deg, turns_taken, odom_m, last_turn_odom_m, wall_edge_odom_m
-        nonlocal saw_pref_wall, open_branch_streak, branch_turn_odom_m, prev_sim_t
+        nonlocal corridor_yaw_deg, turns_taken, last_turn_odom_m, wall_edge_odom_m, other_wall_edge_odom_m
+        nonlocal saw_pref_wall, open_branch_streak, saw_other_wall, other_branch_streak, branch_turn_odom_m
         corridor_yaw_deg = corridor_yaw_deg + nominal_deg
         cur_yaw = float(cur_st["sensors"]["gyro_yaw_deg"])
         turn_delta = _wrap_angle_deg(corridor_yaw_deg - cur_yaw)
@@ -1000,13 +1090,16 @@ def explore_maze(
                 fast_settle=True,
             )["after_status"]
         turns_taken += 1
-        odom_m = float(cur_st["sensors"].get("odom_dist_m", odom_m))
+        _sync_odom(cur_st)
+        breadcrumbs.append((odom_x, odom_y, odom_m, _heading_idx(corridor_yaw_deg)))
         last_turn_odom_m = odom_m
         wall_edge_odom_m = odom_m
+        other_wall_edge_odom_m = odom_m
         saw_pref_wall = False
         open_branch_streak = 0
+        saw_other_wall = False
+        other_branch_streak = 0
         branch_turn_odom_m = None
-        prev_sim_t = float(cur_st.get("sim_time", prev_sim_t))
         return cur_st
 
     try:
@@ -1015,6 +1108,7 @@ def explore_maze(
             t_iter_wall = time.perf_counter()
             if step_idx > 1:
                 st = call_fn("/status?vision=1", "GET", None)
+                _sync_odom(st)
             cur_sim_t = float(st.get("sim_time", 0.0))
             if prev_iter_wall is not None and prev_iter_sim is not None:
                 dt_w = t_iter_wall - prev_iter_wall
@@ -1026,13 +1120,6 @@ def explore_maze(
             prev_iter_wall = t_iter_wall
             prev_iter_sim = cur_sim_t
 
-            if has_hw_odom and "odom_dist_m" in st["sensors"]:
-                odom_m = float(st["sensors"]["odom_dist_m"])
-            else:
-                dt_odom = max(0.0, cur_sim_t - prev_sim_t)
-                odom_m += abs(float(st["sensors"].get("forward_speed_m_s", 0.0))) * dt_odom
-            prev_sim_t = cur_sim_t
-
             rf = st["sensors"]["rangefinders_m"]
             rf_l = float(rf["left"])
             rf_c = float(rf["center"])
@@ -1042,10 +1129,7 @@ def explore_maze(
             rf_l120 = float(rf.get("left120", 3.0))
             rf_r120 = float(rf.get("right120", 3.0))
             has_120 = ("right120" in rf) and ("left120" in rf)
-            rf_l120 = float(rf.get("left120", 3.0))
-            rf_r120 = float(rf.get("right120", 3.0))
 
-            vis = st["vision"]
             done = _maybe_finish_target(st)
             if done is not None:
                 stopped_cleanly = True
@@ -1054,6 +1138,7 @@ def explore_maze(
             pref_90 = rf_r90 if pref_is_right else rf_l90
             other_90 = rf_l90 if pref_is_right else rf_r90
             pref_120 = rf_r120 if pref_is_right else rf_l120
+            other_120 = rf_l120 if pref_is_right else rf_r120
             since_turn_m = odom_m - last_turn_odom_m
 
             if since_turn_m >= 0.18:
@@ -1063,6 +1148,12 @@ def explore_maze(
                 if has_120 and pref_120 < 0.72:
                     saw_pref_wall = True
                     wall_edge_odom_m = max(wall_edge_odom_m, odom_m + 0.06 - 0.5 * pref_120)
+                if other_90 < 0.65:
+                    saw_other_wall = True
+                    other_wall_edge_odom_m = max(other_wall_edge_odom_m, odom_m + 0.10)
+                if has_120 and other_120 < 0.72:
+                    saw_other_wall = True
+                    other_wall_edge_odom_m = max(other_wall_edge_odom_m, odom_m + 0.06 - 0.5 * other_120)
 
             front_blocked = (rf_c < 0.42) or (min(rf_l, rf_r) < 0.30)
             if front_blocked:
@@ -1092,6 +1183,7 @@ def explore_maze(
                         include_vision=True,
                         release_stop=False,
                     )["after_status"]
+                    _sync_odom(settled)
                     rf = settled["sensors"]["rangefinders_m"]
                     rf_l = float(rf["left"])
                     rf_c = float(rf["center"])
@@ -1122,6 +1214,7 @@ def explore_maze(
                         )
                         time.sleep(0.015)
                         settled = call_fn("/status?vision=1", "GET", None)
+                        _sync_odom(settled)
                         if settled["vision"].get("target_visible"):
                             done = _finish_target_seen(settled["vision"])
                             if done is not None:
@@ -1139,10 +1232,17 @@ def explore_maze(
                     pref_90 = rf_r90 if pref_is_right else rf_l90
                     other_90 = rf_l90 if pref_is_right else rf_r90
 
-                if pref_90 > 0.52:
-                    st = _aligned_turn(settled, -90.0 if pref_is_right else 90.0)
+                if loop_mode and pref_90 > 0.52 and other_90 > 0.52:
+                    chosen_deg = (
+                        pref_turn_deg
+                        if _option_rank(pref_turn_deg, 2) >= _option_rank(other_turn_deg, 1)
+                        else other_turn_deg
+                    )
+                    st = _aligned_turn(settled, chosen_deg)
+                elif pref_90 > 0.52:
+                    st = _aligned_turn(settled, pref_turn_deg)
                 elif other_90 > 0.52:
-                    st = _aligned_turn(settled, 90.0 if pref_is_right else -90.0)
+                    st = _aligned_turn(settled, other_turn_deg)
                 else:
                     # Ngõ cụt: xoay 90° hướng mũi ra xa tường hẹp trước, tiến nhẹ ra giữa hành lang rồi xoay nốt 90°
                     too_close_side = min(rf_l90, rf_r90) < 0.24
@@ -1164,6 +1264,7 @@ def explore_maze(
                             include_vision=False,
                             release_stop=False,
                         )["after_status"]
+                        _sync_odom(mid_st)
                     st = _aligned_turn(mid_st, step_deg)
 
                 done = _maybe_finish_target(st)
@@ -1173,6 +1274,7 @@ def explore_maze(
                 continue
 
             side_open = (pref_90 > 0.78 and pref_120 > 0.75) if has_120 else (pref_90 > 0.85)
+            other_open = (other_90 > 0.78 and other_120 > 0.75) if has_120 else (other_90 > 0.85)
             if branch_turn_odom_m is None:
                 if saw_pref_wall and since_turn_m >= 0.28 and side_open:
                     open_branch_streak += 1
@@ -1183,6 +1285,24 @@ def explore_maze(
                 elif not side_open:
                     open_branch_streak = 0
 
+                if branch_turn_odom_m is None and loop_mode and saw_other_wall and since_turn_m >= 0.28 and other_open:
+                    adv_other = (
+                        max(0.0, min(0.30, (other_wall_edge_odom_m + 0.37) - odom_m))
+                        if has_120
+                        else 0.30
+                    )
+                    jx, jy = _probe_xy(0.0, dist_m=adv_other)
+                    pox, poy = _probe_xy(other_turn_deg, dist_m=0.72, origin_xy=(jx, jy))
+                    if _min_crumb_dist(pox, poy) >= 0.44:
+                        other_branch_streak += 1
+                        req_streak = 1 if has_120 else 2
+                        if other_branch_streak >= req_streak:
+                            branch_turn_odom_m = odom_m + max(0.0, adv_other - 0.015)
+                    else:
+                        other_branch_streak = 0
+                elif not other_open:
+                    other_branch_streak = 0
+
             if branch_turn_odom_m is not None and odom_m >= (branch_turn_odom_m - 0.025):
                 branch_turn_odom_m = None
                 st = _fast_settle(include_vision=True)
@@ -1192,14 +1312,55 @@ def explore_maze(
                     return done
                 rf_adv = st["sensors"]["rangefinders_m"]
                 pref_adv = float(rf_adv.get("right90" if pref_is_right else "left90", 3.0))
-                if pref_adv > 0.52:
-                    st = _aligned_turn(st, -90.0 if pref_is_right else 90.0)
-                    done = _maybe_finish_target(st)
-                    if done is not None:
-                        stopped_cleanly = True
-                        return done
-                    continue
-                open_branch_streak = 0
+                other_adv = float(rf_adv.get("left90" if pref_is_right else "right90", 3.0))
+                fwd_adv_ok = (
+                    float(rf_adv["center"]) > 0.68
+                    and min(float(rf_adv["left"]), float(rf_adv["right"])) > 0.36
+                )
+                if not loop_mode:
+                    if pref_adv > 0.52:
+                        st = _aligned_turn(st, pref_turn_deg)
+                        done = _maybe_finish_target(st)
+                        if done is not None:
+                            stopped_cleanly = True
+                            return done
+                        continue
+                    open_branch_streak = 0
+                else:
+                    candidates: list[tuple[tuple[int, int, int], float]] = []
+                    if pref_adv > 0.52:
+                        candidates.append((_option_rank(pref_turn_deg, 3), pref_turn_deg))
+                    if fwd_adv_ok:
+                        candidates.append((_option_rank(0.0, 2), 0.0))
+                    if other_adv > 0.52:
+                        candidates.append((_option_rank(other_turn_deg, 1), other_turn_deg))
+                    if candidates:
+                        best_deg = max(candidates, key=lambda item: item[0])[1]
+                        if abs(best_deg) > 1.0:
+                            if float(rf_adv["center"]) < 0.24 or min(float(rf_adv["left"]), float(rf_adv["right"])) < 0.19:
+                                st = closed_loop_move(
+                                    call_fn,
+                                    meters=-0.06,
+                                    speed_m_s=0.24,
+                                    safety_stop_m=0.0,
+                                    include_vision=True,
+                                    release_stop=False,
+                                )["after_status"]
+                                _sync_odom(st)
+                            st = _aligned_turn(st, best_deg)
+                            done = _maybe_finish_target(st)
+                            if done is not None:
+                                stopped_cleanly = True
+                                return done
+                            continue
+                        last_turn_odom_m = odom_m
+                        saw_pref_wall = False
+                        saw_other_wall = False
+                        open_branch_streak = 0
+                        other_branch_streak = 0
+                    else:
+                        open_branch_streak = 0
+                        other_branch_streak = 0
 
             # Lái bám tâm hành lang mượt mà không làm trôi góc chuẩn corridor_yaw_deg
             cur_yaw_deg = float(st["sensors"]["gyro_yaw_deg"])
@@ -1257,5 +1418,6 @@ def explore_maze(
         "rule": rule,
         "steps": steps_taken,
         "turns": turns_taken,
+        "loop_escaped": bool(loop_mode),
         "after_status": _clean_status(settled),
     }

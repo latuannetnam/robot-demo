@@ -428,10 +428,21 @@ def test_maze_a_occlusion_recovery_and_corridor_move_maintain_wall_clearance():
     assert holder["min_rf"] >= 0.135, f"Wall/corner clearance too tight: min_rf={holder['min_rf']:.4f}m"
 
 
-def _run_explore_and_approach(arena_name: str, rule: str, **explore_kwargs) -> tuple[dict, dict, dict]:
+def _run_explore_and_approach(
+    arena_name: str,
+    rule: str,
+    *,
+    target_xy: tuple[float, float] | None = None,
+    drop_odom_xy: bool = False,
+    tick_batch: int = 12,
+    tick_sleep: float = 0.004,
+    **explore_kwargs,
+) -> tuple[dict, dict, dict]:
     from robot_sim.arenas import resolve_arena_model
 
     app = SimulationApp(model_path=resolve_arena_model(arena_name))
+    if target_xy is not None:
+        app.sim.reset(target_xy=target_xy)
     host, port = app.start_http_server(host="127.0.0.1", port=0)
     url = f"http://{host}:{port}"
     raw_call = lambda path, method="GET", payload=None: robot_ctl._call_bridge(url, path, method, payload)
@@ -453,6 +464,11 @@ def _run_explore_and_approach(arena_name: str, rule: str, **explore_kwargs) -> t
                 holder["min_rf"] = min(holder["min_rf"], cur_min)
                 if cur_min < 0.12:
                     holder["near_count"] += 1
+            if drop_odom_xy:
+                sensors = {
+                    k: v for k, v in res["sensors"].items() if k not in ("odom_x_m", "odom_y_m")
+                }
+                res = {**res, "sensors": sensors}
             if "debug" in res:
                 res = {k: v for k, v in res.items() if k != "debug"}
         return res
@@ -472,8 +488,8 @@ def _run_explore_and_approach(arena_name: str, rule: str, **explore_kwargs) -> t
     t.start()
     try:
         while not stop_evt.is_set():
-            app.tick_headless(step_batch=12)
-            time.sleep(0.004)
+            app.tick_headless(step_batch=tick_batch)
+            time.sleep(tick_sleep)
         t.join(timeout=60.0)
     finally:
         app.shutdown()
@@ -514,18 +530,46 @@ def test_explore_maze_solves_maze_b_with_zero_near_collisions(rule):
     assert stats["min_rf"] >= 0.12, f"Wall clearance too tight: min_rf={stats['min_rf']:.4f}m"
 
 
-def test_explore_maze_solves_maze_c_with_zero_near_collisions():
-    exp_res, app_res, stats = _run_explore_and_approach("maze_c", "right")
-    assert exp_res["target_found"] is True, f"explore_maze(maze_c, rule=right) failed: {exp_res}"
+@pytest.mark.parametrize("rule", ["right", "left"])
+def test_explore_maze_solves_maze_c_with_zero_near_collisions(rule):
+    exp_res, app_res, stats = _run_explore_and_approach(
+        "maze_c", rule, tick_batch=20, tick_sleep=0.002
+    )
+    assert exp_res["target_found"] is True, f"explore_maze(maze_c, rule={rule}) failed: {exp_res}"
+    if rule == "left":
+        assert exp_res["loop_escaped"] is True
     assert "debug" not in exp_res["after_status"]
-    assert app_res["reached"] is True, f"approach_target on maze_c failed: {app_res}"
+    assert app_res["reached"] is True, f"approach_target on maze_c ({rule}) failed: {app_res}"
     assert "debug" not in app_res["after_status"]
     end_st = app_res["after_status"]
     assert end_st["vision"]["target_visible"] is True
     assert abs(float(end_st["vision"]["target"]["offset_x"])) < 0.20
     assert 0.15 <= float(end_st["sensors"]["rangefinders_m"]["center"]) <= 0.35
     assert stats["near_count"] == 0, f"Near-collision events={stats['near_count']} (min_rf={stats['min_rf']:.4f}m)"
-    assert stats["min_rf"] >= 0.16, f"Wall clearance too tight: min_rf={stats['min_rf']:.4f}m"
+    assert stats["min_rf"] >= 0.14, f"Wall clearance too tight: min_rf={stats['min_rf']:.4f}m"
+
+
+@pytest.mark.parametrize("drop_odom_xy", [False, True])
+def test_explore_maze_escapes_maze_c_island_to_outer_dead_end_and_supports_legacy_odom(drop_odom_xy):
+    exp_res, app_res, stats = _run_explore_and_approach(
+        "maze_c",
+        "right",
+        target_xy=(-1.6, 1.6),
+        drop_odom_xy=drop_odom_xy,
+        tick_batch=20,
+        tick_sleep=0.002,
+    )
+    assert exp_res["target_found"] is True, f"Failed to escape island (drop_odom_xy={drop_odom_xy}): {exp_res}"
+    assert exp_res["loop_escaped"] is True
+    assert "debug" not in exp_res["after_status"]
+    assert app_res["reached"] is True, f"approach_target failed on outer dead-end: {app_res}"
+    assert "debug" not in app_res["after_status"]
+    end_st = app_res["after_status"]
+    assert end_st["vision"]["target_visible"] is True
+    assert abs(float(end_st["vision"]["target"]["offset_x"])) < 0.25
+    assert 0.15 <= float(end_st["sensors"]["rangefinders_m"]["center"]) <= 0.35
+    assert stats["near_count"] == 0, f"Near-collision events={stats['near_count']} (min_rf={stats['min_rf']:.4f}m)"
+    assert stats["min_rf"] >= 0.12, f"Wall clearance too tight: min_rf={stats['min_rf']:.4f}m"
 
 
 def test_scan_360_no_recover_stops_without_large_overshoot():

@@ -235,7 +235,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_approach.add_argument("--max-steps", type=int, default=120, help="Số nhịp điều khiển tối đa (mặc định: 120)")
     p_approach.add_argument("--step-dt", type=float, default=0.15, help="Chu kỳ mỗi nhịp điều khiển (giây)")
 
-    p_explore = sub.add_parser("explore", help="Tự hành dò mê cung khép kín theo quy tắc bám tường (chuẩn Sim-to-Real)")
+    p_explore = sub.add_parser(
+        "explore",
+        help="Tự hành dò mê cung khép kín theo quy tắc bám tường kèm Odometry 2D tự phát hiện và thoát đảo vòng lặp (chuẩn Sim-to-Real)",
+    )
     p_explore.add_argument("--rule", default="right", choices=["right", "left"], help="Quy tắc bám tường (right hoặc left)")
     p_explore.add_argument("--max-steps", type=int, default=850, help="Số nhịp điều khiển tối đa (mặc định: 850)")
     p_explore.add_argument("--speed", type=float, default=0.64, help="Tốc độ di chuyển hành lang (m/s, mặc định: 0.64)")

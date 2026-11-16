@@ -119,6 +119,8 @@ class RobotSimulation:
         self._command_deadline: float | None = None
         self._gyro_yaw_rad: float = 0.0
         self._odom_dist_m: float = 0.0
+        self._odom_x_m: float = 0.0
+        self._odom_y_m: float = 0.0
         self._renderer: mujoco.Renderer | None = None
         self._renderer_size: tuple[int, int] | None = None
         self._clean_vis_opt = mujoco.MjvOption()
@@ -189,6 +191,8 @@ class RobotSimulation:
         self._command_deadline = None
         self._gyro_yaw_rad = 0.0
         self._odom_dist_m = 0.0
+        self._odom_x_m = 0.0
+        self._odom_y_m = 0.0
         self._state_epoch += 1
         self._vision_cache.clear()
         return self.get_status()
@@ -306,6 +310,8 @@ class RobotSimulation:
         self._command_deadline = None
         self._gyro_yaw_rad = 0.0
         self._odom_dist_m = 0.0
+        self._odom_x_m = 0.0
+        self._odom_y_m = 0.0
         self._state_epoch += 1
         self._vision_cache.clear()
         mujoco.mj_forward(self.model, self.data)
@@ -317,10 +323,16 @@ class RobotSimulation:
         mujoco.mj_step(self.model, self.data)
         self._state_epoch += 1
         gyro_z = float(self.data.sensordata[self._sensor_adr["chassis_gyro"] + 2])
-        fwd_v = float(self.data.sensordata[self._sensor_adr["chassis_vel"]])
+        vel_adr = self._sensor_adr["chassis_vel"]
+        fwd_v = float(self.data.sensordata[vel_adr])
+        lat_v = float(self.data.sensordata[vel_adr + 1])
         dt = float(self.model.opt.timestep)
+        prev_yaw = self._gyro_yaw_rad
         self._gyro_yaw_rad += gyro_z * dt
         self._odom_dist_m += fwd_v * dt
+        mid_yaw = 0.5 * (prev_yaw + self._gyro_yaw_rad)
+        self._odom_x_m += (fwd_v * math.cos(mid_yaw) - lat_v * math.sin(mid_yaw)) * dt
+        self._odom_y_m += (fwd_v * math.sin(mid_yaw) + lat_v * math.cos(mid_yaw)) * dt
         if self._command_deadline is not None and self.data.time >= self._command_deadline:
             self.stop()
 
@@ -376,6 +388,8 @@ class RobotSimulation:
                 "wheel_vel_rad_s": {"left": round(left_vel, 4), "right": round(right_vel, 4)},
                 "forward_speed_m_s": round(forward_speed, 4),
                 "odom_dist_m": round(self._odom_dist_m, 4),
+                "odom_x_m": round(self._odom_x_m, 4),
+                "odom_y_m": round(self._odom_y_m, 4),
                 "yaw_rate_rad_s": round(yaw_rate, 4),
                 "gyro_yaw_deg": round(math.degrees(self._gyro_yaw_rad), 3),
             },

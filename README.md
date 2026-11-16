@@ -11,8 +11,8 @@ Dự án nhập môn thực hành mô phỏng vật lý **MuJoCo** dành cho ng�
 - `models/robot_2wheel.xml` — Phần cứng dùng chung của xe robot 2 bánh vi sai (khung xe, 2 bánh chủ động, cặp bánh cầu đỡ trước/sau, camera mũi xe `front_cam`, các cảm biến khoảng cách `<rangefinder>` và IMU), được nhúng chung vào mọi sa bàn.
 - `models/arena_2wheel.xml`, `models/arena_maze_a.xml`, `models/arena_maze_b.xml`, `models/arena_maze_c.xml` — 4 bản đồ địa hình chuẩn (sân mở 3 vật cản màu `2wheel` và 3 mê cung nhiều tầng độ khó: `maze_a` hành lang 1.0m chữ S, `maze_b` hành lang 0.8m 9 khúc cua, `maze_c` đảo tường chữ U có vòng lặp ở tâm).
 - `robot_sim/arenas.py` — Danh bạ thông số địa hình chuẩn, giải phân giải bí danh (`2wheel`/`default`/`basic`, `maze_a`/`maze`, `maze_b`, `maze_c`) và tra cứu bản đồ.
-- `robot_sim/core.py` — Lõi điều khiển vật lý, tích phân IMU Gyro 500 Hz, tự động dò cảm biến khoảng cách động, nạp nóng/chuyển đổi bản đồ nguyên tử (`reload`) và phân tích `Edge Vision` trong RAM.
-- `robot_sim/skills.py` — Các kỹ năng phản xạ khép kín 20 Hz chuẩn Sim-to-Real (`scan`, `approach`, xoay khép kín theo Gyro, giữ hướng thẳng, chờ tắt dao động sau lệnh).
+- `robot_sim/core.py` — Lõi điều khiển vật lý, tích phân IMU Gyro + Odometry 2D tương đối 500 Hz (`odom_x_m`, `odom_y_m`), tự động dò cảm biến khoảng cách động, nạp nóng/chuyển đổi bản đồ nguyên tử (`reload`) và phân tích `Edge Vision` trong RAM.
+- `robot_sim/skills.py` — Các kỹ năng phản xạ khép kín 20 Hz chuẩn Sim-to-Real (`scan`, `approach`, `explore` dò mê cung & phá vòng lặp đảo chữ U `maze_c`, xoay khép kín theo Gyro, giữ hướng thẳng, chờ tắt dao động sau lệnh).
 - `robot_sim/telemetry.py` — Hộp đen giám sát nền 10 Hz (0 token LLM) xuất báo cáo tóm tắt JSON `< 2 KB` (ghi nhận va chạm tường bao, vách mê cung lẫn vật cản).
 - `robot_sim/integrity.py` — Hàng rào chống gian lận khóa cứng tất cả bản đồ `models/arena_*.xml` và kiểm tra biên dạng cơ khí Sim-to-Real của `models/robot_2wheel.xml`.
 - `sim_server.py` — Chương trình mở **cửa sổ 3D MuJoCo trực tiếp** kèm máy chủ HTTP cục bộ (`127.0.0.1:8765`, hỗ trợ `--arena`).

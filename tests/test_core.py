@@ -307,5 +307,52 @@ def test_analyze_vision_caches_same_state_and_invalidates_on_pose_change():
         sim.close()
 
 
+def test_spawn_relative_2d_odometry_tracks_turns_and_resets_cleanly():
+    sim = RobotSimulation(model_path="maze_c")
+    try:
+        st0 = sim.get_status()
+        assert st0["sensors"]["odom_x_m"] == 0.0
+        assert st0["sensors"]["odom_y_m"] == 0.0
+        assert "arena" not in st0["sensors"]
+        sx, sy = st0["debug"]["robot_xy"]
+        yaw0_rad = math.radians(st0["debug"]["robot_yaw_deg"])
+
+        # Drive straight out of center room (~0.6m), pause, turn left ~90°, then drive ~0.45m
+        for lw, rw, secs in [
+            (8.0, 8.0, 1.6),
+            (0.0, 0.0, 0.3),
+            (-5.0, 5.0, 0.72),
+            (0.0, 0.0, 0.3),
+            (8.0, 8.0, 1.2),
+            (0.0, 0.0, 0.3),
+        ]:
+            sim.set_wheels(lw, rw, duration=secs)
+            sim.step_seconds(secs)
+
+        st1 = sim.get_status()
+        ox = float(st1["sensors"]["odom_x_m"])
+        oy = float(st1["sensors"]["odom_y_m"])
+        assert ox > 0.25
+        assert oy > 0.20
+
+        ex, ey = st1["debug"]["robot_xy"]
+        dx_w, dy_w = ex - sx, ey - sy
+        true_rx = dx_w * math.cos(-yaw0_rad) - dy_w * math.sin(-yaw0_rad)
+        true_ry = dx_w * math.sin(-yaw0_rad) + dy_w * math.cos(-yaw0_rad)
+        assert math.hypot(ox - true_rx, oy - true_ry) < 0.03
+
+        st_reset = sim.reset()
+        assert st_reset["sensors"]["odom_x_m"] == 0.0
+        assert st_reset["sensors"]["odom_y_m"] == 0.0
+
+        sim.set_wheels(6.0, 6.0, duration=0.5)
+        sim.step_seconds(0.5)
+        st_reload = sim.reload(model_path="maze_a")
+        assert st_reload["sensors"]["odom_x_m"] == 0.0
+        assert st_reload["sensors"]["odom_y_m"] == 0.0
+    finally:
+        sim.close()
+
+
 
 
