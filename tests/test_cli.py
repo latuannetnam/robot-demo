@@ -299,3 +299,55 @@ def test_cli_explore_subcommand_runs_and_strips_debug(capsys):
     assert "debug" not in out["after_status"]
 
 
+def test_cli_agent_brain_subcommands_run_strip_debug_and_validate_args(capsys):
+    app = SimulationApp()
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    stop_evt = threading.Event()
+    res: dict = {}
+    err_holder: list[BaseException] = []
+
+    def worker():
+        try:
+            assert robot_ctl.main(["--url", url, "reset", "--target-x", "0.95", "--target-y", "0.0"]) == 0
+            capsys.readouterr()
+
+            assert robot_ctl.main(["--url", url, "advance", "--max-dist", "0.50", "--speed", "0.40"]) == 0
+            res["advance"] = json.loads(capsys.readouterr().out)
+
+            assert robot_ctl.main(["--url", url, "dock", "--stop-distance", "0.25"]) == 0
+            res["dock"] = json.loads(capsys.readouterr().out)
+
+            code_bad_adv = robot_ctl.main(["--url", url, "advance", "--max-dist", "-1.0"])
+            err_bad_adv = capsys.readouterr().err
+            res["bad_adv"] = (code_bad_adv, err_bad_adv)
+
+            code_bad_gate = robot_ctl.main(["--url", url, "cross-gate", "--timeout", "0"])
+            err_bad_gate = capsys.readouterr().err
+            res["bad_gate"] = (code_bad_gate, err_bad_gate)
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=10)
+            time.sleep(0.004)
+        t.join(timeout=20.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    assert res["advance"]["event"] in {"target_ready", "max_dist"}
+    assert "debug" not in res["advance"]["after_status"]
+    assert res["dock"]["reached"] is True
+    assert "debug" not in res["dock"]["after_status"]
+    assert res["bad_adv"][0] == 1 and "Lỗi điều khiển robot" in res["bad_adv"][1]
+    assert res["bad_gate"][0] == 1 and "Lỗi điều khiển robot" in res["bad_gate"][1]
+
+

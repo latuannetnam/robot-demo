@@ -10,9 +10,12 @@ import time
 from urllib.parse import urlsplit
 
 from robot_sim.skills import (
+    advance_segment,
     approach_target,
     closed_loop_move,
     closed_loop_turn,
+    cross_dynamic_gate,
+    dock_target,
     explore_maze,
     scan_for_target,
     wait_until_settled,
@@ -244,6 +247,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_explore.add_argument("--speed", type=float, default=0.64, help="Tốc độ di chuyển hành lang (m/s, mặc định: 0.64)")
     p_explore.add_argument("--step-dt", type=float, default=0.10, help="Chu kỳ mỗi nhịp điều khiển (giây)")
 
+    p_advance = sub.add_parser(
+        "advance",
+        help="Tiến thẳng vô trạng thái 1 đoạn hành lang/sân mở và dừng ngay khi gặp ngã rẽ, vật cản hoặc gần đích (agent-brain)",
+    )
+    p_advance.add_argument("--max-dist", type=float, default=1.8, help="Quãng đường tối đa một lần gọi (mét, mặc định: 1.8)")
+    p_advance.add_argument("--speed", type=float, default=0.55, help="Tốc độ tiến thẳng (m/s, mặc định: 0.55)")
+    p_advance.add_argument("--step-dt", type=float, default=0.10, help="Chu kỳ mỗi nhịp điều khiển (giây)")
+
+    p_cross_gate = sub.add_parser(
+        "cross-gate",
+        help="Chờ một cổng/làn tuần tra động mở khe an toàn rồi băng qua đúng 1 nhịp (agent-brain)",
+    )
+    p_cross_gate.add_argument("--timeout", type=float, default=12.0, help="Thời gian chờ mở cổng tối đa theo sim_time (giây)")
+
+    p_dock = sub.add_parser(
+        "dock",
+        help="Căn thẳng tâm và tiến sát dừng êm trước mục tiêu ở cự ly gần (agent-brain)",
+    )
+    p_dock.add_argument("--stop-distance", type=float, default=0.25, help="Khoảng cách dừng trước mục tiêu (mét, mặc định: 0.25)")
+    p_dock.add_argument("--max-steps", type=int, default=80, help="Số nhịp tối đa (mặc định: 80)")
+    p_dock.add_argument("--step-dt", type=float, default=0.12, help="Chu kỳ mỗi nhịp điều khiển (giây)")
+
     sub.add_parser("stop", help="Dừng khẩn cấp hai động cơ bánh xe")
 
     p_reset = sub.add_parser("reset", help="Đưa robot và mục tiêu về trạng thái ban đầu")
@@ -401,6 +426,28 @@ def main(argv: list[str] | None = None) -> int:
                 rule=args.rule,
                 max_steps=args.max_steps,
                 speed_m_s=args.speed,
+                step_dt=args.step_dt,
+            )
+        elif args.command == "advance":
+            call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
+            output = advance_segment(
+                call_fn,
+                max_dist=args.max_dist,
+                speed_m_s=args.speed,
+                step_dt=args.step_dt,
+            )
+        elif args.command == "cross-gate":
+            call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
+            output = cross_dynamic_gate(
+                call_fn,
+                timeout_s=args.timeout,
+            )
+        elif args.command == "dock":
+            call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
+            output = dock_target(
+                call_fn,
+                stop_distance=args.stop_distance,
+                max_steps=args.max_steps,
                 step_dt=args.step_dt,
             )
         elif args.command == "stop":
