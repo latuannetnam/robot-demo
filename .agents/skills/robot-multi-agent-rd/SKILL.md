@@ -21,7 +21,7 @@ Before Round 1, read the two reference templates and register both subagent type
 For Round `i = 1..3`:
 
 1. **Set Arena Challenge (Main Agent):**
-   Switch to the requested arena (`2wheel`, `maze_a` / alias `maze`, `maze_b`, or `maze_c`) or reset target coordinates dynamically without restarting the 3D viewer:
+   Switch to the requested arena (`2wheel`, `maze_a` / alias `maze`, `maze_b`, `maze_c`, `dynamic_a` / alias `dynamic`, or `dynamic_b`) or reset target coordinates dynamically without restarting the 3D viewer:
    ```powershell
    # Switch arena (automatically uses the arena's default spawn & target unless --target-x/--target-y are passed)
    .venv\Scripts\python.exe robot_ctl.py reload --arena maze_a --vision
@@ -38,7 +38,7 @@ For Round `i = 1..3`:
 
 3. **Dispatch `robot-driver` Subagent (`invoke_subagent`):**
    - Pass `TypeName: "robot-driver"`, `Model: "inherit"` (or `"flash"` when user explicitly requests fast/light model).
-   - Brief: state ONLY the mission goal (`vision.target_visible == true`, `|offset_x| < 0.25`, `0.15 <= rf_center <= 0.35`, zero collisions) — NEVER reveal `<X>, <Y>` coordinates, spawn pose, or which arena (`2wheel` / `maze_a` / `maze_b` / `maze_c`) is loaded!
+   - Brief: state ONLY the mission goal (`vision.target_visible == true`, `|offset_x| < 0.25`, `0.15 <= rf_center <= 0.35`, zero collisions) — NEVER reveal `<X>, <Y>` coordinates, spawn pose, or which arena (`2wheel` / `maze_a` / `maze_b` / `maze_c` / `dynamic_a` / `dynamic_b`) is loaded!
    - End turn and wait for reactive wakeup (do **not** poll).
 
 4. **Collect Compact 1 KB Scorecard:**
@@ -51,8 +51,8 @@ For Round `i = 1..3`:
 5. **Grade & Decide:**
    - **Pass & Optimal Criteria:**
      - `goal_reached == true`
-     - `near_collision_count == 0` and `error_count == 0`
-     - `wall_time_s <= 90.0` on open arena (`2wheel`), or `wall_time_s <= 180.0` (`<= 180s`) on multi-corridor mazes (`maze_a`, `maze_b`, `maze_c`)
+     - `contact_count == 0` (zero physical collisions with walls or static/moving obstacles), `near_collision_count == 0`, and `error_count == 0`
+     - `wall_time_s <= 90.0` on open static arena (`2wheel`), `wall_time_s <= 120.0` on dynamic crosswalk arena (`dynamic_a`), or `wall_time_s <= 180.0` (`<= 180s`) on multi-corridor mazes (`maze_a`, `maze_b`, `maze_c`, `dynamic_b`)
      - `anomalies.braking_rf_drop_m < 0.15`
    - If **Pass & Optimal** (or `i == 3`), stop the loop and present the round-by-round scorecard table to the user.
    - Otherwise, record current `git rev-parse HEAD` (or diff checkpoint) and dispatch **`robot-engineer`** (`invoke_subagent` with `TypeName: "robot-engineer"`), passing:

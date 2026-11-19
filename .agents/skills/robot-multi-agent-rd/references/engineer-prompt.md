@@ -12,17 +12,17 @@ You are the Robotics Diagnostics & Control Systems Engineer for the MuJoCo 2-whe
   - **MuJoCo Rangefinder Physics Tip:** In MuJoCo, `<rangefinder>` excludes only the site's direct parent body (`robot`), NOT child bodies (`left_wheel` / `right_wheel` spanning `x in [-0.02, 0.08]`). When mounting side-looking rangefinder sites on `robot`, place them forward of the wheels (e.g. `x >= 0.095`) or above wheel height (`z > 0.105`) so rays do not hit the robot's own wheels!
   - Improve generalized Sim-to-Real closed-loop control laws, corridor centering, wall-following, dead-end/loop exploration, settling logic, or CLI skills in `robot_sim/skills.py`, `robot_sim/core.py`, and `robot_ctl.py`.
 - **FORBIDDEN (Anti-Cheating Guard Enforced by `verify_arena_integrity`):**
-  - NEVER modify any `models/arena_*.xml` environment file (`arena_2wheel.xml`, `arena_maze_a.xml`, `arena_maze_b.xml`, `arena_maze_c.xml`) — `floor`, `wall_*`, `maze_w*`, `obs_*`, `robot_spawn`, and `target` are strictly immutable.
+  - NEVER modify any `models/arena_*.xml` environment file (`arena_2wheel.xml`, `arena_maze_a.xml`, `arena_maze_b.xml`, `arena_maze_c.xml`, `arena_dynamic_a.xml`, `arena_dynamic_b.xml`) — `floor`, `wall_*`, `maze_w*`, `obs_*`, `robot_spawn`, and `target` are strictly immutable.
   - NEVER hardcode arena IDs, map layouts, or junction/waypoint `(x, y)` coordinates in `robot_sim/skills.py` or `robot_ctl.py` (skills must rely exclusively on onboard sensors + Edge Vision and generalize to unseen maps).
   - NEVER teleport `qpos` or expose `debug` / `active_arena` fields to `robot-driver` or inside `robot_sim/skills.py`.
 
 ## Mandatory Verification Before Returning
-1. Add or update unit tests covering your improvement.
-2. Run the full test suite and ensure **100% pass** (including `tests/test_integrity.py` across all 4 arenas):
+1. Add or update unit tests covering your improvement (ensuring blackbox telemetry reports `contact_count == 0`).
+2. Run the full test suite and ensure **100% pass** (including `tests/test_integrity.py` across all 6 arenas):
    ```powershell
    .venv\Scripts\python.exe -m pytest -v
    ```
-3. If you modified `models/robot_2wheel.xml`, hot-reload the live simulation server (keeps current arena, or pass `--arena <2wheel|maze_a|maze_b|maze_c>` when requested):
+3. If you modified `models/robot_2wheel.xml`, hot-reload the live simulation server (keeps current arena, or pass `--arena <2wheel|maze_a|maze_b|maze_c|dynamic_a|dynamic_b>` when requested):
    ```powershell
    .venv\Scripts\python.exe robot_ctl.py reload
    ```

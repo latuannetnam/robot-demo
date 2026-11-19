@@ -66,6 +66,7 @@ def test_telemetry_record_clears_stale_stop_flag_and_summarizes_run(tmp_path: Pa
     assert summary["arena"] == "2wheel"
     assert summary["sample_count"] >= 3
     assert summary["error_count"] == 0
+    assert summary["contact_count"] == 0
     assert summary["path_length_m"] > 0.15
     assert summary["duty_cycle_pct"] > 0.0
     assert "anomalies" in summary
@@ -113,12 +114,18 @@ def test_telemetry_tracks_arena_and_all_dynamic_rangefinders(tmp_path: Path, mon
     def fake_fetch(_base_url: str, timeout: float = 1.5) -> dict:
         nonlocal calls
         calls += 1
-        stop_file.write_text("stop\n", encoding="utf-8")
+        if calls >= 2:
+            stop_file.write_text("stop\n", encoding="utf-8")
         return {
             "sim_time": 0.5 * calls,
             "moving": True,
             "sensors": {
-                "rangefinders_m": {"left": 2.1, "center": 1.8, "right": 2.4, "side_left": 0.08},
+                "rangefinders_m": {
+                    "left": 2.1,
+                    "center": 1.8,
+                    "right": 2.4,
+                    "side_left": 0.25 if calls == 1 else 0.08,
+                },
                 "forward_speed_m_s": 0.2,
                 "yaw_rate_rad_s": 0.0,
             },
@@ -129,6 +136,7 @@ def test_telemetry_tracks_arena_and_all_dynamic_rangefinders(tmp_path: Path, mon
                 "robot_xy": [-1.5, -1.5],
                 "robot_yaw_deg": 0.0,
                 "target_xy": [1.5, 1.5],
+                "contact_count": 0 if calls == 1 else 3,
             },
         }
 
@@ -137,6 +145,7 @@ def test_telemetry_tracks_arena_and_all_dynamic_rangefinders(tmp_path: Path, mon
     assert summary["arena"] == "maze_a"
     assert summary["min_rangefinder_m"] == 0.08
     assert summary["near_collision_count"] == 1
+    assert summary["contact_count"] == 3
 
 
 def test_fetch_raw_status_recovers_from_stale_keepalive_connection():

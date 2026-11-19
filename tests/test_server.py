@@ -209,7 +209,7 @@ def test_server_arenas_endpoint_and_hot_reload_between_arenas():
 
     assert results["arenas_blind"][0] == 200
     blind_data = results["arenas_blind"][1]["data"]
-    assert len(blind_data["arenas"]) == 4
+    assert len(blind_data["arenas"]) == 6
     assert "active_arena" not in blind_data
     assert "active_model" not in blind_data
     for entry in blind_data["arenas"]:

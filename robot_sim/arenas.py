@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +26,23 @@ _ISLAND_GRAY = [0.58, 0.60, 0.64, 1.0]
 
 
 @dataclass(frozen=True)
+class MovingObstacleSpec:
+    body_name: str
+    joint_name: str
+    geom_name: str
+    geom_type: str
+    base_pos: list[float]
+    geom_size: list[float]
+    rgba: list[float]
+    slide_axis: list[float]
+    slide_range: list[float]
+    amplitude_m: float
+    freq_hz: float
+    phase_rad: float
+    mass_kg: float = 8.0
+
+
+@dataclass(frozen=True)
 class ArenaSpec:
     arena_id: str
     aliases: tuple[str, ...]
@@ -38,6 +55,7 @@ class ArenaSpec:
     spawn_xy: tuple[float, float]
     spawn_yaw_deg: float
     default_target_xy: tuple[float, float]
+    moving_obstacles: dict[str, MovingObstacleSpec] = field(default_factory=dict)
 
 
 ARENAS: dict[str, ArenaSpec] = {
@@ -136,6 +154,137 @@ ARENAS: dict[str, ArenaSpec] = {
         spawn_yaw_deg=-90.0,
         default_target_xy=(1.6, 1.6),
     ),
+    "dynamic_a": ArenaSpec(
+        arena_id="dynamic_a",
+        aliases=("dynamic",),
+        filename="arena_dynamic_a.xml",
+        description="Sân mở 4m x 4m với 3 làn vật cản màu tuần tra cắt ngang khác tốc độ và pha.",
+        floor_size=(2.0, 2.0, 0.05),
+        walls=dict(_MAZE_OUTER_WALLS),
+        obstacles={},
+        maze_walls={},
+        spawn_xy=(-1.65, 0.0),
+        spawn_yaw_deg=0.0,
+        default_target_xy=(1.66, 0.0),
+        moving_obstacles={
+            "obs_red": MovingObstacleSpec(
+                "obs_red",
+                "obs_red_slide",
+                "obs_red_geom",
+                "cylinder",
+                [-0.92, 0.0, 0.12],
+                [0.11, 0.12],
+                [0.90, 0.25, 0.20, 1.0],
+                [0.0, 1.0, 0.0],
+                [-1.35, 1.35],
+                0.95,
+                0.062,
+                0.35,
+                8.0,
+            ),
+            "obs_blue": MovingObstacleSpec(
+                "obs_blue",
+                "obs_blue_slide",
+                "obs_blue_geom",
+                "box",
+                [0.0, 0.0, 0.12],
+                [0.11, 0.11, 0.12],
+                [0.20, 0.48, 0.92, 1.0],
+                [0.0, 1.0, 0.0],
+                [-1.35, 1.35],
+                1.00,
+                0.072,
+                2.20,
+                8.0,
+            ),
+            "obs_yellow": MovingObstacleSpec(
+                "obs_yellow",
+                "obs_yellow_slide",
+                "obs_yellow_geom",
+                "cylinder",
+                [0.88, 0.0, 0.12],
+                [0.11, 0.12],
+                [0.95, 0.78, 0.15, 1.0],
+                [0.0, 1.0, 0.0],
+                [-1.35, 1.35],
+                0.95,
+                0.056,
+                -1.10,
+                8.0,
+            ),
+        },
+    ),
+    "dynamic_b": ArenaSpec(
+        arena_id="dynamic_b",
+        aliases=(),
+        filename="arena_dynamic_b.xml",
+        description="Hành lang chữ S rộng 0.9m với 3 cổng nút cổ chai có vật cản tuần tra đóng/mở theo chu kỳ.",
+        floor_size=(2.0, 2.0, 0.05),
+        walls=dict(_MAZE_OUTER_WALLS),
+        obstacles={},
+        maze_walls={
+            "maze_w01": ([-1.10, 0.45, 0.14], [0.90, 0.02, 0.14], list(_STONE_GRAY)),
+            "maze_w02": ([-1.37, -0.45, 0.14], [0.63, 0.02, 0.14], list(_STONE_GRAY)),
+            "maze_w03": ([0.17, -0.45, 0.14], [0.53, 0.02, 0.14], list(_STONE_GRAY)),
+            "maze_w04": ([-0.55, -0.78, 0.14], [0.24, 0.02, 0.14], list(_STONE_GRAY)),
+            "maze_w05": ([0.68, 0.04, 0.14], [0.02, 0.51, 0.14], list(_STONE_GRAY)),
+            "maze_w06": ([-0.22, 1.18, 0.14], [0.02, 0.29, 0.14], list(_STONE_GRAY)),
+            "maze_w07": ([-0.56, 0.67, 0.14], [0.02, 0.24, 0.14], list(_STONE_GRAY)),
+            "maze_w08": ([0.88, 1.45, 0.14], [1.12, 0.02, 0.14], list(_STONE_GRAY)),
+            "maze_w09": ([1.53, 0.55, 0.14], [0.47, 0.02, 0.14], list(_STONE_GRAY)),
+            "maze_w10": ([0.88, 0.22, 0.14], [0.24, 0.02, 0.14], list(_STONE_GRAY)),
+        },
+        spawn_xy=(-1.55, 0.0),
+        spawn_yaw_deg=0.0,
+        default_target_xy=(1.66, 1.00),
+        moving_obstacles={
+            "obs_red": MovingObstacleSpec(
+                "obs_red",
+                "obs_red_slide",
+                "obs_red_geom",
+                "cylinder",
+                [-0.55, -0.20, 0.12],
+                [0.12, 0.12],
+                [0.90, 0.25, 0.20, 1.0],
+                [0.0, 1.0, 0.0],
+                [-0.50, 0.50],
+                0.40,
+                0.085,
+                0.80,
+                8.0,
+            ),
+            "obs_blue": MovingObstacleSpec(
+                "obs_blue",
+                "obs_blue_slide",
+                "obs_blue_geom",
+                "box",
+                [-0.02, 0.67, 0.12],
+                [0.11, 0.11, 0.12],
+                [0.20, 0.48, 0.92, 1.0],
+                [1.0, 0.0, 0.0],
+                [-0.45, 0.45],
+                0.37,
+                0.075,
+                1.90,
+                8.0,
+            ),
+            "obs_yellow": MovingObstacleSpec(
+                "obs_yellow",
+                "obs_yellow_slide",
+                "obs_yellow_geom",
+                "cylinder",
+                [0.88, 0.80, 0.12],
+                [0.11, 0.12],
+                [0.95, 0.78, 0.15, 1.0],
+                [0.0, 1.0, 0.0],
+                [-0.50, 0.50],
+                0.40,
+                0.090,
+                -0.80,
+                8.0,
+            ),
+        },
+    ),
 }
 
 MODEL_NAME_TO_ARENA_ID: dict[str, str] = {
@@ -185,7 +334,7 @@ def resolve_arena_model(
         )
 
     if not resolved.is_file():
-        valid_names = ", ".join([*ARENAS.keys(), "maze", "default", "basic"])
+        valid_names = ", ".join([*ARENAS.keys(), "maze", "dynamic", "default", "basic"])
         raise ValueError(
             f"Không tìm thấy địa hình hoặc file mô hình XML '{arena_or_path}'. "
             f"Các tên địa hình hợp lệ: {valid_names}."

@@ -608,3 +608,139 @@ def test_scan_360_no_recover_stops_without_large_overshoot():
 
     assert holder["scan"]["target_found"] is False
     assert 356.0 <= holder["scan"]["scanned_degrees"] <= 363.0
+
+
+@pytest.mark.parametrize("phase_wait", [0.0, 2.5, 5.0])
+def test_approach_target_crosses_dynamic_a_three_lanes_with_zero_contacts(phase_wait):
+    from robot_sim.arenas import resolve_arena_model
+
+    app = SimulationApp(model_path=resolve_arena_model("dynamic_a"))
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    raw_call = lambda path, method="GET", payload=None: robot_ctl._call_bridge(url, path, method, payload)
+    stop_evt = threading.Event()
+    holder: dict = {"min_rf": 99.0, "near_count": 0}
+    err_holder: list[BaseException] = []
+
+    def tracked_call_fn(path: str, method: str = "GET", payload: dict | None = None) -> dict:
+        res = raw_call(path, method, payload)
+        if path.startswith("/status") and isinstance(res, dict) and "sensors" in res:
+            rf = res["sensors"]["rangefinders_m"]
+            vis = res.get("vision", {})
+            t_vis = bool(vis.get("target_visible", False))
+            t_obj = vis.get("target")
+            facing_target = t_vis and isinstance(t_obj, dict) and abs(float(t_obj["offset_x"])) < 0.28
+            cur_min = min(float(v) for v in rf.values())
+            if not facing_target:
+                holder["min_rf"] = min(holder["min_rf"], cur_min)
+                if cur_min < 0.12:
+                    holder["near_count"] += 1
+            if "debug" in res:
+                res = {k: v for k, v in res.items() if k != "debug"}
+        return res
+
+    def worker():
+        try:
+            st0 = tracked_call_fn("/status?vision=1", "GET")
+            if phase_wait > 0.0:
+                t0 = float(st0["sim_time"])
+                while float(tracked_call_fn("/status", "GET")["sim_time"]) - t0 < phase_wait:
+                    tracked_call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.35})
+                    time.sleep(0.01)
+                st0 = tracked_call_fn("/status?vision=1", "GET")
+            if not st0["vision"]["target_visible"]:
+                scan_for_target(tracked_call_fn, max_degrees=360.0, direction="left")
+            holder["app_res"] = approach_target(tracked_call_fn, stop_distance=0.25, max_steps=160)
+            holder["final_debug"] = raw_call("/status", "GET")["debug"]
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=10)
+            time.sleep(0.004)
+        t.join(timeout=90.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    app_res = holder["app_res"]
+    final_debug = holder["final_debug"]
+    assert app_res["reached"] is True, f"dynamic_a (wait={phase_wait}) failed: {app_res}"
+    assert "debug" not in app_res["after_status"]
+    assert final_debug["contact_count"] == 0
+    assert holder["near_count"] == 0
+    assert holder["min_rf"] >= 0.14
+
+
+@pytest.mark.parametrize("rule", ["right", "left"])
+def test_explore_and_approach_solve_dynamic_b_piston_gates_with_zero_contacts(rule):
+    from robot_sim.arenas import resolve_arena_model
+
+    app = SimulationApp(model_path=resolve_arena_model("dynamic_b"))
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    raw_call = lambda path, method="GET", payload=None: robot_ctl._call_bridge(url, path, method, payload)
+    stop_evt = threading.Event()
+    holder: dict = {"min_rf": 99.0, "near_count": 0}
+    err_holder: list[BaseException] = []
+
+    def tracked_call_fn(path: str, method: str = "GET", payload: dict | None = None) -> dict:
+        res = raw_call(path, method, payload)
+        if path.startswith("/status") and isinstance(res, dict) and "sensors" in res:
+            rf = res["sensors"]["rangefinders_m"]
+            vis = res.get("vision", {})
+            t_vis = bool(vis.get("target_visible", False))
+            t_obj = vis.get("target")
+            facing_target = t_vis and isinstance(t_obj, dict) and abs(float(t_obj["offset_x"])) < 0.28
+            cur_min = min(float(v) for v in rf.values())
+            if not facing_target:
+                holder["min_rf"] = min(holder["min_rf"], cur_min)
+                if cur_min < 0.12:
+                    holder["near_count"] += 1
+            if "debug" in res:
+                res = {k: v for k, v in res.items() if k != "debug"}
+        return res
+
+    def worker():
+        try:
+            exp_res = explore_maze(tracked_call_fn, rule=rule, max_steps=600)
+            holder["exp_res"] = exp_res
+            if exp_res["target_found"]:
+                holder["app_res"] = approach_target(tracked_call_fn, stop_distance=0.25, max_steps=160)
+            holder["final_debug"] = raw_call("/status", "GET")["debug"]
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=10)
+            time.sleep(0.004)
+        t.join(timeout=120.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    exp_res = holder["exp_res"]
+    app_res = holder["app_res"]
+    final_debug = holder["final_debug"]
+    assert exp_res["target_found"] is True, f"dynamic_b explore failed: {exp_res}"
+    assert exp_res["gates_yielded"] >= 1
+    assert "debug" not in exp_res["after_status"]
+    assert app_res["reached"] is True, f"dynamic_b approach failed: {app_res}"
+    assert "debug" not in app_res["after_status"]
+    assert final_debug["contact_count"] == 0
+    assert holder["near_count"] == 0
+    assert holder["min_rf"] >= 0.14

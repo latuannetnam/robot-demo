@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 from pathlib import Path
 import mujoco
 import numpy as np
 from PIL import Image
 
-from robot_sim.arenas import identify_arena_id, resolve_arena_model
+from robot_sim.arenas import ARENAS, identify_arena_id, resolve_arena_model
 from robot_sim.integrity import verify_arena_integrity
 
 WHEEL_RADIUS = 0.05
@@ -102,9 +103,119 @@ def _read_spawn_pose(model: mujoco.MjModel) -> tuple[float, float, float]:
 
 def _apply_spawn_pose(model: mujoco.MjModel, data: mujoco.MjData) -> None:
     sx, sy, syaw = _read_spawn_pose(model)
-    data.qpos[0] = sx
-    data.qpos[1] = sy
-    data.qpos[3:7] = [math.cos(syaw / 2.0), 0.0, 0.0, math.sin(syaw / 2.0)]
+    qadr = 0
+    rf_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "robot_free")
+    if rf_jid >= 0:
+        qadr = int(model.jnt_qposadr[rf_jid])
+    data.qpos[qadr] = sx
+    data.qpos[qadr + 1] = sy
+    data.qpos[qadr + 3 : qadr + 7] = [math.cos(syaw / 2.0), 0.0, 0.0, math.sin(syaw / 2.0)]
+
+
+@dataclass(frozen=True)
+class _MovingObsDriver:
+    body_name: str
+    qpos_adr: int
+    dof_adr: int
+    amp: float
+    omega: float
+    phase: float
+    mass: float
+    base_xy: tuple[float, float]
+    axis_xy: tuple[float, float]
+    clearance_radius: float
+
+
+@dataclass(frozen=True)
+class _ModelBindings:
+    robot_qpos_adr: int
+    target_mocap_id: int
+    left_motor_id: int
+    right_motor_id: int
+    robot_geom_ids: frozenset[int]
+    hazard_geom_ids: frozenset[int]
+    moving_obs_drivers: tuple[_MovingObsDriver, ...]
+
+
+def _discover_model_bindings(model: mujoco.MjModel, model_path: Path) -> _ModelBindings:
+    rf_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "robot_free")
+    robot_qpos_adr = int(model.jnt_qposadr[rf_jid]) if rf_jid >= 0 else 0
+
+    target_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "target")
+    target_mocap_id = int(model.body_mocapid[target_bid]) if (target_bid >= 0 and int(model.body_mocapid[target_bid]) >= 0) else 0
+
+    left_act = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "left_motor")
+    right_act = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "right_motor")
+    left_motor_id = int(left_act) if left_act >= 0 else 0
+    right_motor_id = int(right_act) if right_act >= 0 else 1
+
+    robot_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot")
+    robot_bodies: set[int] = {int(robot_bid)} if robot_bid >= 0 else set()
+    changed = True
+    while changed and robot_bodies:
+        changed = False
+        for bid in range(model.nbody):
+            if bid not in robot_bodies and int(model.body_parentid[bid]) in robot_bodies:
+                robot_bodies.add(bid)
+                changed = True
+
+    robot_geoms: set[int] = set()
+    hazard_geoms: set[int] = set()
+    for gid in range(model.ngeom):
+        bid = int(model.geom_bodyid[gid])
+        if bid in robot_bodies:
+            if int(model.geom_contype[gid]) != 0 and int(model.geom_conaffinity[gid]) != 0:
+                robot_geoms.add(gid)
+            continue
+        gname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, gid) or ""
+        bname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, bid) or ""
+        if gname.startswith(("wall_", "maze_w", "obs_")) or bname.startswith("obs_"):
+            hazard_geoms.add(gid)
+
+    drivers: list[_MovingObsDriver] = []
+    arena_id = identify_arena_id(model_path)
+    spec = ARENAS.get(arena_id)
+    if spec is not None and spec.moving_obstacles:
+        for mspec in spec.moving_obstacles.values():
+            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, mspec.joint_name)
+            if jid < 0:
+                raise ValueError(f"Mô hình '{model_path.name}' thiếu khớp trượt '{mspec.joint_name}'.")
+            rad = (
+                float(mspec.geom_size[0])
+                if mspec.geom_type == "cylinder"
+                else math.hypot(float(mspec.geom_size[0]), float(mspec.geom_size[1]))
+            )
+            drivers.append(
+                _MovingObsDriver(
+                    body_name=mspec.body_name,
+                    qpos_adr=int(model.jnt_qposadr[jid]),
+                    dof_adr=int(model.jnt_dofadr[jid]),
+                    amp=float(mspec.amplitude_m),
+                    omega=2.0 * math.pi * float(mspec.freq_hz),
+                    phase=float(mspec.phase_rad),
+                    mass=float(mspec.mass_kg),
+                    base_xy=(float(mspec.base_pos[0]), float(mspec.base_pos[1])),
+                    axis_xy=(float(mspec.slide_axis[0]), float(mspec.slide_axis[1])),
+                    clearance_radius=rad,
+                )
+            )
+
+    return _ModelBindings(
+        robot_qpos_adr=robot_qpos_adr,
+        target_mocap_id=target_mocap_id,
+        left_motor_id=left_motor_id,
+        right_motor_id=right_motor_id,
+        robot_geom_ids=frozenset(robot_geoms),
+        hazard_geom_ids=frozenset(hazard_geoms),
+        moving_obs_drivers=tuple(drivers),
+    )
+
+
+def _init_moving_obstacles(data: mujoco.MjData, drivers: tuple[_MovingObsDriver, ...]) -> None:
+    t = float(data.time)
+    for drv in drivers:
+        data.qpos[drv.qpos_adr] = drv.amp * math.sin(drv.omega * t + drv.phase)
+        data.qvel[drv.dof_adr] = drv.amp * drv.omega * math.cos(drv.omega * t + drv.phase)
 
 
 class RobotSimulation:
@@ -114,13 +225,18 @@ class RobotSimulation:
         self.model_path = resolve_arena_model(model_path)
         self.model = mujoco.MjModel.from_xml_path(str(self.model_path))
         self.data = mujoco.MjData(self.model)
-        self._default_target_pos = self.data.mocap_pos[0].copy()
+        self._bindings = _discover_model_bindings(self.model, self.model_path)
+        self._default_target_pos = self.data.mocap_pos[self._bindings.target_mocap_id].copy()
         _apply_spawn_pose(self.model, self.data)
+        _init_moving_obstacles(self.data, self._bindings.moving_obs_drivers)
         self._command_deadline: float | None = None
         self._gyro_yaw_rad: float = 0.0
         self._odom_dist_m: float = 0.0
         self._odom_x_m: float = 0.0
         self._odom_y_m: float = 0.0
+        self._contact_count: int = 0
+        self._contact_steps: int = 0
+        self._in_hazard_contact: bool = False
         self._renderer: mujoco.Renderer | None = None
         self._renderer_size: tuple[int, int] | None = None
         self._clean_vis_opt = mujoco.MjvOption()
@@ -150,41 +266,46 @@ class RobotSimulation:
         verify_arena_integrity(resolved)
 
         new_model = mujoco.MjModel.from_xml_path(str(resolved))
+        new_bindings = _discover_model_bindings(new_model, resolved)
         new_sensor_adr, new_rangefinders = _discover_sensors(new_model)
         keep_prev = (resolved == self.model_path) if preserve_target is None else preserve_target
-        prev_target_pos = self.data.mocap_pos[0].copy()
+        prev_target_pos = self.data.mocap_pos[self._bindings.target_mocap_id].copy()
         validated_target: tuple[float, float] | None = None
         if target_xy is not None:
-            validated_target = self.validate_target_xy(target_xy, model=new_model)
+            validated_target = self.validate_target_xy(target_xy, model=new_model, model_path=resolved)
         elif keep_prev and resolved != self.model_path:
             validated_target = self.validate_target_xy(
                 (float(prev_target_pos[0]), float(prev_target_pos[1])),
                 model=new_model,
+                model_path=resolved,
             )
 
         new_data = mujoco.MjData(new_model)
-        new_default_target_pos = new_data.mocap_pos[0].copy()
+        new_mocap_id = new_bindings.target_mocap_id
+        new_default_target_pos = new_data.mocap_pos[new_mocap_id].copy()
         _apply_spawn_pose(new_model, new_data)
+        _init_moving_obstacles(new_data, new_bindings.moving_obs_drivers)
         if validated_target is not None:
-            new_data.mocap_pos[0] = [
+            new_data.mocap_pos[new_mocap_id] = [
                 validated_target[0],
                 validated_target[1],
                 float(new_default_target_pos[2]),
             ]
         elif keep_prev:
-            new_data.mocap_pos[0] = [
+            new_data.mocap_pos[new_mocap_id] = [
                 float(prev_target_pos[0]),
                 float(prev_target_pos[1]),
                 float(new_default_target_pos[2]),
             ]
         else:
-            new_data.mocap_pos[0] = new_default_target_pos.copy()
+            new_data.mocap_pos[new_mocap_id] = new_default_target_pos.copy()
         mujoco.mj_forward(new_model, new_data)
 
         self.close()
         self.model_path = resolved
         self.model = new_model
         self.data = new_data
+        self._bindings = new_bindings
         self._default_target_pos = new_default_target_pos
         self._sensor_adr = new_sensor_adr
         self._rangefinders = new_rangefinders
@@ -193,6 +314,9 @@ class RobotSimulation:
         self._odom_dist_m = 0.0
         self._odom_x_m = 0.0
         self._odom_y_m = 0.0
+        self._contact_count = 0
+        self._contact_steps = 0
+        self._in_hazard_contact = False
         self._state_epoch += 1
         self._vision_cache.clear()
         return self.get_status()
@@ -215,8 +339,8 @@ class RobotSimulation:
         clamped_right = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, float(right_rad_s)))
         capped_duration = min(float(duration), MAX_COMMAND_DURATION)
 
-        self.data.ctrl[0] = clamped_left
-        self.data.ctrl[1] = clamped_right
+        self.data.ctrl[self._bindings.left_motor_id] = clamped_left
+        self.data.ctrl[self._bindings.right_motor_id] = clamped_right
         self._command_deadline = float(self.data.time) + capped_duration
         return {
             "left_rad_s": round(clamped_left, 4),
@@ -237,16 +361,26 @@ class RobotSimulation:
         return cmd
 
     def stop(self) -> dict:
-        self.data.ctrl[0] = 0.0
-        self.data.ctrl[1] = 0.0
+        self.data.ctrl[self._bindings.left_motor_id] = 0.0
+        self.data.ctrl[self._bindings.right_motor_id] = 0.0
         self._command_deadline = None
         return {"stopped": True, "sim_time": round(float(self.data.time), 4)}
+
+    @staticmethod
+    def _point_to_segment_dist(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+        dx, dy = bx - ax, by - ay
+        len_sq = dx * dx + dy * dy
+        if len_sq <= 1e-12:
+            return math.hypot(px - ax, py - ay)
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / len_sq))
+        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
     def validate_target_xy(
         self,
         target_xy: tuple[float, float] | list[float],
         *,
         model: mujoco.MjModel | None = None,
+        model_path: Path | None = None,
     ) -> tuple[float, float]:
         if not isinstance(target_xy, (list, tuple)) or len(target_xy) != 2:
             raise ValueError("'target_xy' phải là danh sách gồm đúng 2 số [x, y].")
@@ -261,6 +395,28 @@ class RobotSimulation:
         target_radius = 0.10
         box_type = int(mujoco.mjtGeom.mjGEOM_BOX)
         cyl_type = int(mujoco.mjtGeom.mjGEOM_CYLINDER)
+        moving_names: set[str] = set()
+
+        check_path = model_path if model_path is not None else self.model_path
+        arena_id = identify_arena_id(check_path)
+        spec = ARENAS.get(arena_id)
+        if spec is not None and spec.moving_obstacles:
+            moving_names = set(spec.moving_obstacles.keys())
+            for mspec in spec.moving_obstacles.values():
+                bx, by = float(mspec.base_pos[0]), float(mspec.base_pos[1])
+                ax_dir, ay_dir = float(mspec.slide_axis[0]), float(mspec.slide_axis[1])
+                amp = float(mspec.amplitude_m)
+                p1x, p1y = bx - amp * ax_dir, by - amp * ay_dir
+                p2x, p2y = bx + amp * ax_dir, by + amp * ay_dir
+                obs_rad = (
+                    float(mspec.geom_size[0])
+                    if mspec.geom_type == "cylinder"
+                    else max(float(mspec.geom_size[0]), float(mspec.geom_size[1]))
+                )
+                if self._point_to_segment_dist(tx, ty, p1x, p1y, p2x, p2y) < (obs_rad + target_radius - 1e-6):
+                    raise ValueError(
+                        f"Tọa độ mục tiêu ({tx}, {ty}) nằm trên hành lang tuần tra của vật cản di động '{mspec.body_name}'."
+                    )
 
         for gid in range(target_model.ngeom):
             gname = mujoco.mj_id2name(target_model, mujoco.mjtObj.mjOBJ_GEOM, gid) or ""
@@ -279,7 +435,7 @@ class RobotSimulation:
                     raise ValueError(
                         f"Tọa độ mục tiêu ({tx}, {ty}) chồng lấn lên tường '{gname}'."
                     )
-            elif bname.startswith("obs_"):
+            elif bname.startswith("obs_") and bname not in moving_names:
                 ox = float(target_model.body_pos[bid][0] + target_model.geom_pos[gid][0])
                 oy = float(target_model.body_pos[bid][1] + target_model.geom_pos[gid][1])
                 if gtype == box_type:
@@ -306,12 +462,16 @@ class RobotSimulation:
 
         mujoco.mj_resetData(self.model, self.data)
         _apply_spawn_pose(self.model, self.data)
-        self.data.mocap_pos[0] = [tx, ty, float(self._default_target_pos[2])]
+        _init_moving_obstacles(self.data, self._bindings.moving_obs_drivers)
+        self.data.mocap_pos[self._bindings.target_mocap_id] = [tx, ty, float(self._default_target_pos[2])]
         self._command_deadline = None
         self._gyro_yaw_rad = 0.0
         self._odom_dist_m = 0.0
         self._odom_x_m = 0.0
         self._odom_y_m = 0.0
+        self._contact_count = 0
+        self._contact_steps = 0
+        self._in_hazard_contact = False
         self._state_epoch += 1
         self._vision_cache.clear()
         mujoco.mj_forward(self.model, self.data)
@@ -320,8 +480,32 @@ class RobotSimulation:
     def step_once(self) -> None:
         if self._command_deadline is not None and self.data.time >= self._command_deadline:
             self.stop()
+        if self._bindings.moving_obs_drivers:
+            t_cur = float(self.data.time)
+            for drv in self._bindings.moving_obs_drivers:
+                s_des = drv.amp * math.sin(drv.omega * t_cur + drv.phase)
+                v_des = drv.amp * drv.omega * math.cos(drv.omega * t_cur + drv.phase)
+                a_ff = -drv.amp * (drv.omega * drv.omega) * math.sin(drv.omega * t_cur + drv.phase)
+                s_cur = float(self.data.qpos[drv.qpos_adr])
+                v_cur = float(self.data.qvel[drv.dof_adr])
+                self.data.qfrc_applied[drv.dof_adr] = (
+                    drv.mass * a_ff + 1600.0 * (s_des - s_cur) + 220.0 * (v_des - v_cur)
+                )
         mujoco.mj_step(self.model, self.data)
         self._state_epoch += 1
+        if self._bindings.hazard_geom_ids:
+            robot_geoms = self._bindings.robot_geom_ids
+            hazard_geoms = self._bindings.hazard_geom_ids
+            touching_now = any(
+                (int(c.geom1) in robot_geoms and int(c.geom2) in hazard_geoms)
+                or (int(c.geom2) in robot_geoms and int(c.geom1) in hazard_geoms)
+                for c in self.data.contact[: self.data.ncon]
+            )
+            if touching_now:
+                self._contact_steps += 1
+                if not self._in_hazard_contact:
+                    self._contact_count += 1
+            self._in_hazard_contact = touching_now
         gyro_z = float(self.data.sensordata[self._sensor_adr["chassis_gyro"] + 2])
         vel_adr = self._sensor_adr["chassis_vel"]
         fwd_v = float(self.data.sensordata[vel_adr])
@@ -365,7 +549,9 @@ class RobotSimulation:
         forward_speed = float(self.data.sensordata[self._sensor_adr["chassis_vel"]])
         yaw_rate = float(self.data.sensordata[self._sensor_adr["chassis_gyro"] + 2])
 
-        quat = self.data.qpos[3:7]
+        qadr = self._bindings.robot_qpos_adr
+        mocap_id = self._bindings.target_mocap_id
+        quat = self.data.qpos[qadr + 3 : qadr + 7]
         yaw_rad = float(
             np.arctan2(
                 2.0 * (quat[0] * quat[3] + quat[1] * quat[2]),
@@ -396,12 +582,15 @@ class RobotSimulation:
             "debug": {
                 "arena": identify_arena_id(self.model_path),
                 "model": self.model_path.name,
-                "robot_xy": [round(float(self.data.qpos[0]), 4), round(float(self.data.qpos[1]), 4)],
+                "robot_xy": [round(float(self.data.qpos[qadr]), 4), round(float(self.data.qpos[qadr + 1]), 4)],
                 "robot_yaw_deg": round(math.degrees(yaw_rad), 2),
                 "target_xy": [
-                    round(float(self.data.mocap_pos[0][0]), 4),
-                    round(float(self.data.mocap_pos[0][1]), 4),
+                    round(float(self.data.mocap_pos[mocap_id][0]), 4),
+                    round(float(self.data.mocap_pos[mocap_id][1]), 4),
                 ],
+                "in_contact": bool(self._in_hazard_contact),
+                "contact_count": int(self._contact_count),
+                "contact_steps": int(self._contact_steps),
             },
         }
         if include_vision:
@@ -422,9 +611,10 @@ class RobotSimulation:
         area_pct = (100.0 * count) / float(total)
         if area_pct < min_area_pct:
             return None
-        xs = np.where(mask)[1]
+        ys, xs = np.where(mask)
         half_w = mask.shape[1] / 2.0
         offset_x = (float(xs.mean()) - half_w) / half_w
+        v_span = float(ys.max() - ys.min() + 1) / float(mask.shape[0])
         if offset_x < -0.20:
             side = "left"
         elif offset_x > 0.20:
@@ -435,6 +625,7 @@ class RobotSimulation:
             "offset_x": round(offset_x, 3),
             "side": side,
             "area_pct": round(area_pct, 2),
+            "v_span": round(v_span, 3),
         }
 
     def analyze_vision(self, camera_name: str = "front_cam", *, _forward: bool = True) -> dict:
@@ -442,8 +633,8 @@ class RobotSimulation:
         self._validate_camera_name(camera_name)
         pose_sig = (
             self._state_epoch,
-            tuple(round(float(x), 7) for x in self.data.qpos[:7]),
-            tuple(round(float(x), 7) for x in self.data.mocap_pos[0]),
+            tuple(round(float(x), 6) for x in self.data.qpos),
+            tuple(round(float(x), 6) for x in self.data.mocap_pos[self._bindings.target_mocap_id]),
         )
         cached = self._vision_cache.get(camera_name)
         if cached is not None and cached[0] == pose_sig:

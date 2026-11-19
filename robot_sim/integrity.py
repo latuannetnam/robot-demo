@@ -330,7 +330,7 @@ def verify_arena_integrity(model_path: Path | str | None = None) -> dict:
 
     # 0. Whitelist top-level worldbody elements against the matched ArenaSpec
     allowed_geoms = {"floor", *spec.walls.keys(), *spec.maze_walls.keys()}
-    allowed_bodies = {*spec.obstacles.keys(), "target"}
+    allowed_bodies = {*spec.obstacles.keys(), *spec.moving_obstacles.keys(), "target"}
     if included_robot_body is None:
         allowed_bodies.add("robot")
 
@@ -439,6 +439,58 @@ def verify_arena_integrity(model_path: Path | str | None = None) -> dict:
         _assert_collision_enabled(obs_geom, geom_name)
         if len(list(obs_body)) != 1:
             raise ValueError(f"Vi phạm toàn vẹn sa bàn: '{body_name}' không được chứa phần tử phụ.")
+
+    # 5b. Moving obstacles (on dynamic arenas)
+    for body_name, mspec in spec.moving_obstacles.items():
+        obs_body = worldbody.find(f"./body[@name='{body_name}']")
+        if obs_body is None:
+            raise ValueError(f"Vi phạm toàn vẹn sa bàn: thiếu vật cản di động '{body_name}'.")
+        _assert_no_rotation_attrs(obs_body, body_name)
+        _assert_vec_close(_parse_vec(obs_body.get("pos"), 3, f"{body_name}.pos"), mspec.base_pos, f"{body_name}.pos")
+
+        children = list(obs_body)
+        if len(children) != 2:
+            raise ValueError(
+                f"Vi phạm toàn vẹn sa bàn: vật cản di động '{body_name}' phải chứa đúng 1 <joint> và 1 <geom>."
+            )
+
+        obs_joint = obs_body.find(f"./joint[@name='{mspec.joint_name}']")
+        if obs_joint is None or obs_joint.get("type") != "slide":
+            raise ValueError(
+                f"Vi phạm toàn vẹn sa bàn: thiếu hoặc sai kiểu khớp trượt '{mspec.joint_name}' của '{body_name}'."
+            )
+        _assert_vec_close(
+            _parse_vec(obs_joint.get("axis"), 3, f"{mspec.joint_name}.axis"),
+            mspec.slide_axis,
+            f"{mspec.joint_name}.axis",
+        )
+        _assert_vec_close(
+            _parse_vec(obs_joint.get("range"), 2, f"{mspec.joint_name}.range"),
+            mspec.slide_range,
+            f"{mspec.joint_name}.range",
+        )
+
+        obs_geom = obs_body.find(f"./geom[@name='{mspec.geom_name}']")
+        if obs_geom is None or obs_geom.get("type") != mspec.geom_type:
+            raise ValueError(
+                f"Vi phạm toàn vẹn sa bàn: thiếu hoặc sai kiểu hình học '{mspec.geom_name}' của '{body_name}'."
+            )
+        _assert_no_rotation_attrs(obs_geom, mspec.geom_name)
+        _assert_vec_close(
+            _parse_vec(obs_geom.get("size"), len(mspec.geom_size), f"{mspec.geom_name}.size"),
+            mspec.geom_size,
+            f"{mspec.geom_name}.size",
+        )
+        obs_rgba = _parse_vec(obs_geom.get("rgba"), 4, f"{mspec.geom_name}.rgba")
+        _assert_vec_close(obs_rgba, mspec.rgba, f"{mspec.geom_name}.rgba", tol=0.05)
+        if obs_rgba[3] < 0.99:
+            raise ValueError(f"Vi phạm toàn vẹn sa bàn: vật cản di động '{mspec.geom_name}' phải đục hoàn toàn (alpha=1.0).")
+        mass_val = _parse_vec(obs_geom.get("mass"), 1, f"{mspec.geom_name}.mass")[0]
+        if mass_val < 4.0:
+            raise ValueError(
+                f"Vi phạm toàn vẹn sa bàn: khối lượng '{mspec.geom_name}' quá nhẹ ({mass_val} kg < 4.0 kg)."
+            )
+        _assert_collision_enabled(obs_geom, mspec.geom_name)
 
     # 6. Green mocap target
     target_body = worldbody.find("./body[@name='target']")

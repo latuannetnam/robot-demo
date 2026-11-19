@@ -591,13 +591,22 @@ def scan_for_target(
     }
 
 
+def _estimate_obs_cam_dist_m(obs: dict) -> float:
+    """Ước lượng khoảng cách từ front_cam tới bề mặt vật cản màu qua chiều cao ảnh chuẩn hóa (v_span)."""
+    v_span = obs.get("v_span")
+    if v_span is not None and float(v_span) > 0.04:
+        return 0.188 / float(v_span)
+    area = max(0.20, float(obs.get("area_pct", 0.20)))
+    return max(0.15, math.sqrt(2.35 / area) - 0.12)
+
+
 def approach_target(
     call_fn: BridgeCall,
     stop_distance: float = 0.25,
-    max_steps: int = 120,
+    max_steps: int = 160,
     step_dt: float = 0.15,
 ) -> dict:
-    """Tiếp cận mục tiêu xanh khép kín tầm xa qua hành lang vật cản dựa trên Edge Vision + Rangefinder."""
+    """Tiếp cận mục tiêu xanh khép kín tầm xa qua hành lang vật cản (tĩnh & di động) dựa trên Edge Vision + Rangefinder."""
     _require_finite(stop_distance=stop_distance, max_steps=max_steps, step_dt=step_dt)
     if isinstance(max_steps, bool) or int(max_steps) < 1:
         raise ValueError("Số bước 'max_steps' phải là số nguyên >= 1.")
@@ -615,6 +624,20 @@ def approach_target(
     min_goal_area = 0.8 / ((stop_distance + 0.20) ** 2)
     watchdog_dur = round(max(0.55, step_dt * 3.5), 3)
 
+    prev_obs_state: dict[str, tuple[float, float, float]] = {}
+    obs_probe_start: dict[str, tuple[float, float, float]] = {}
+    confirmed_dynamic: set[str] = set()
+    confirmed_static: set[str] = set()
+    initial_scene_checked = False
+    init_probe_t0: float | None = None
+    init_probe_obs: dict[str, float] = {}
+    last_seen_dyn_rail: dict[str, tuple[float, float, float, float]] = {}
+    blind_wing_wait_since: dict[str, float] = {}
+    commit_until_odom = -1.0
+    was_visual_yielding = False
+    ever_narrow_corridor = False
+    wide_corridor_latched = False
+
     sim_per_wall = 1.0
     has_rate_estimate = False
     prev_iter_wall: float | None = None
@@ -622,8 +645,11 @@ def approach_target(
     stopped_cleanly = False
 
     try:
-        for step_idx in range(1, int(max_steps) + 1):
-            steps_taken = step_idx
+        drive_steps = 0
+        yield_steps = 0
+        max_yield_steps = max(480, int(max_steps) * 4)
+        while drive_steps < int(max_steps) and yield_steps < max_yield_steps:
+            steps_taken = max(1, drive_steps + 1)
             t_iter_wall = time.perf_counter()
             st = call_fn("/status?vision=1", "GET", None)
             cur_sim_t = float(st.get("sim_time", 0.0))
@@ -643,12 +669,35 @@ def approach_target(
             rf_r90 = float(rf.get("right90", 3.0))
             rf_l120 = float(rf.get("left120", 3.0))
             rf_r120 = float(rf.get("right120", 3.0))
+            corridor_wall_now = (
+                (rf_l90 + rf_r90) < 1.35
+                or (rf_l90 < 0.50 and rf_l120 < 0.62)
+                or (rf_r90 < 0.50 and rf_r120 < 0.62)
+            )
+            if corridor_wall_now:
+                ever_narrow_corridor = True
+            elif min(rf_l90, rf_r90) > 0.75:
+                ever_narrow_corridor = False
+            in_narrow_corridor = corridor_wall_now or ever_narrow_corridor
             cur_odom_m = float(st["sensors"].get("odom_dist_m", 0.0))
             vis = st["vision"]
             seen = bool(vis["target_visible"])
             offset_x = float(vis["target"]["offset_x"]) if seen else last_offset_x
             area_pct = float(vis["target"]["area_pct"]) if seen else 0.0
             obstacles = vis.get("obstacles", [])
+            if not in_narrow_corridor:
+                wide_corridor_latched = False
+            elif (
+                seen
+                and abs(offset_x) < 0.28
+                and rf_c > 0.80
+                and min(rf_l, rf_r) > 0.50
+                and (
+                    min(rf_l90, rf_r90) >= 0.31
+                    or (bool(confirmed_dynamic) and min(rf_l90, rf_r90) >= 0.24 and (rf_l90 + rf_r90) >= 0.72)
+                )
+            ):
+                wide_corridor_latched = True
 
             closer_center_obs = any(
                 float(o["area_pct"]) > max(1.0, area_pct * 1.2) and abs(float(o["offset_x"])) < 0.30
@@ -696,6 +745,8 @@ def approach_target(
                 )
                 target_wall_dt = min(0.030, step_dt * 0.8) if not has_rate_estimate else (step_dt * 0.8) / sim_per_wall
                 time.sleep(max(0.008, target_wall_dt - (time.perf_counter() - t_iter_wall)))
+                drive_steps += 1
+                steps_taken = drive_steps
                 continue
 
             if seen:
@@ -707,7 +758,18 @@ def approach_target(
                 lost_streak += 1
                 if lost_start_odom_m is None:
                     lost_start_odom_m = cur_odom_m
-                max_lost = 42 if ever_seen else 1
+                max_lost = (
+                    75
+                    if (ever_seen and (confirmed_dynamic or cur_odom_m < commit_until_odom))
+                    else (
+                        25
+                        if (
+                            not ever_seen
+                            and (confirmed_dynamic or (not initial_scene_checked and bool(obstacles)))
+                        )
+                        else (42 if ever_seen else 1)
+                    )
+                )
                 if lost_streak > max_lost:
                     settled = _stop_and_settle(call_fn, include_vision=True)
                     stopped_cleanly = True
@@ -725,7 +787,316 @@ def approach_target(
                 and area_pct >= max(3.2, 0.8 / ((rf_c + 0.15) ** 2))
             )
 
-            if not target_is_close_center and ((rf_c < 0.17 and min(rf_l, rf_r) < 0.20) or min(rf_c, rf_l, rf_r) < 0.15):
+            # Phân loại vật cản tĩnh/động & nhường đường an toàn trước đường ray tuần tra
+            cur_obs_state: dict[str, tuple[float, float, float]] = {}
+            yield_brake = False
+            visual_yield_now = False
+            min_yield_z = 99.0
+            fwd_spd = float(st["sensors"].get("forward_speed_m_s", 0.0))
+            fwd_spd_abs = abs(fwd_spd)
+            yaw_rate = float(st["sensors"].get("yaw_rate_rad_s", 0.0))
+            yaw_spd_abs = abs(yaw_rate)
+            min_front_rf = min(rf_l, rf_c, rf_r)
+
+            if not initial_scene_checked:
+                pocket_piston_corridor = (
+                    in_narrow_corridor
+                    and seen
+                    and abs(offset_x) < 0.25
+                    and rf_c > 1.05
+                    and min(rf_l, rf_r) > 0.50
+                    and min(rf_l90, rf_r90) >= 0.24
+                    and (rf_l90 + rf_r90) >= 0.72
+                )
+                if not obstacles:
+                    if pocket_piston_corridor:
+                        if init_probe_t0 is None:
+                            init_probe_t0 = cur_sim_t
+                        elif (cur_sim_t - init_probe_t0) >= 2.2:
+                            initial_scene_checked = True
+                        if not initial_scene_checked:
+                            call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": watchdog_dur})
+                            time.sleep(0.015)
+                            yield_steps += 1
+                            continue
+                    else:
+                        initial_scene_checked = True
+                elif in_narrow_corridor:
+                    confirmed_dynamic.update(str(o.get("color", "")) for o in obstacles)
+                    initial_scene_checked = True
+                else:
+                    if fwd_spd_abs < 0.04 and yaw_spd_abs < 0.06:
+                        cur_map = {str(o.get("color", "")): float(o["offset_x"]) for o in obstacles}
+                        if init_probe_t0 is None:
+                            init_probe_t0 = cur_sim_t
+                            init_probe_obs = cur_map
+                        else:
+                            common = set(cur_map) & set(init_probe_obs)
+                            max_dox = max((abs(cur_map[c] - init_probe_obs[c]) for c in common), default=0.0)
+                            sym_diff = set(cur_map) ^ set(init_probe_obs)
+                            if max_dox >= 0.015 or (sym_diff and (cur_sim_t - init_probe_t0) >= 0.16):
+                                confirmed_dynamic.update(cur_map.keys())
+                                confirmed_dynamic.update(init_probe_obs.keys())
+                                initial_scene_checked = True
+                                yaw0_deg = float(st["sensors"]["gyro_yaw_deg"])
+
+                                def _glance_wing(target_yaw_deg: float) -> dict:
+                                    cur_y = float(call_fn("/status", "GET", None)["sensors"]["gyro_yaw_deg"])
+                                    delta_deg = _wrap_angle_deg(target_yaw_deg - cur_y)
+                                    st_a = (
+                                        closed_loop_turn(
+                                            call_fn,
+                                            degrees=delta_deg,
+                                            max_speed_deg_s=220.0,
+                                            tol_deg=1.8,
+                                            include_vision=True,
+                                            release_stop=False,
+                                            fast_settle=True,
+                                        )["after_status"]
+                                        if abs(delta_deg) >= 1.0
+                                        else call_fn("/status?vision=1", "GET", None)
+                                    )
+                                    t_a = float(st_a.get("sim_time", 0.0))
+                                    st_b = st_a
+                                    w_deadline = time.monotonic() + 1.5
+                                    while time.monotonic() < w_deadline and (float(st_b.get("sim_time", t_a)) - t_a) < 0.12:
+                                        call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": watchdog_dur})
+                                        time.sleep(0.012)
+                                        st_b = call_fn("/status?vision=1", "GET", None)
+                                    d_yaw_rad = math.radians(_wrap_angle_deg(float(st_b["sensors"]["gyro_yaw_deg"]) - yaw0_deg))
+                                    map_a = {str(o.get("color", "")): o for o in st_a.get("vision", {}).get("obstacles", [])}
+                                    odom_b = float(st_b["sensors"].get("odom_dist_m", 0.0))
+                                    t_b = float(st_b.get("sim_time", 0.0))
+                                    for o_b in st_b.get("vision", {}).get("obstacles", []):
+                                        cn = str(o_b.get("color", ""))
+                                        if cn in confirmed_static:
+                                            continue
+                                        zb = _estimate_obs_cam_dist_m(o_b)
+                                        ox_b = float(o_b["offset_x"])
+                                        y_cam_b = -ox_b * zb * FRONT_CAM_TAN_HALF_FOVX
+                                        fwd_b = zb * math.cos(d_yaw_rad) - y_cam_b * math.sin(d_yaw_rad)
+                                        lat_b = zb * math.sin(d_yaw_rad) + y_cam_b * math.cos(d_yaw_rad)
+                                        if not (0.18 <= fwd_b <= 1.35):
+                                            continue
+                                        ox_eq = -lat_b / max(0.20, fwd_b * FRONT_CAM_TAN_HALF_FOVX)
+                                        dox_eq = -0.5 * (1.0 if ox_eq >= 0.0 else -1.0)
+                                        if cn in map_a:
+                                            za = _estimate_obs_cam_dist_m(map_a[cn])
+                                            ox_a = float(map_a[cn]["offset_x"])
+                                            y_cam_a = -ox_a * za * FRONT_CAM_TAN_HALF_FOVX
+                                            lat_a = za * math.sin(d_yaw_rad) + y_cam_a * math.cos(d_yaw_rad)
+                                            if abs(lat_b) > abs(lat_a) + 0.015:
+                                                dox_eq = 0.5 * (1.0 if ox_eq >= 0.0 else -1.0)
+                                        confirmed_dynamic.add(cn)
+                                        last_seen_dyn_rail[cn] = (t_b, odom_b + fwd_b, ox_eq, dox_eq)
+                                        blind_wing_wait_since.pop(cn, None)
+                                    return st_b
+
+                                _glance_wing(yaw0_deg + 26.0)
+                                _glance_wing(yaw0_deg - 26.0)
+                                cur_y_end = float(call_fn("/status", "GET", None)["sensors"]["gyro_yaw_deg"])
+                                back_deg = _wrap_angle_deg(yaw0_deg - cur_y_end)
+                                if abs(back_deg) >= 0.8:
+                                    closed_loop_turn(
+                                        call_fn,
+                                        degrees=back_deg,
+                                        max_speed_deg_s=200.0,
+                                        tol_deg=1.2,
+                                        include_vision=True,
+                                        release_stop=False,
+                                        fast_settle=True,
+                                    )
+                                call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": watchdog_dur})
+                                prev_iter_wall = None
+                                prev_iter_sim = None
+                                if not seen:
+                                    lost_streak = max(0, lost_streak - 1)
+                                yield_steps += 1
+                                continue
+                            elif (cur_sim_t - init_probe_t0) >= 0.25:
+                                confirmed_static.update(cur_map.keys())
+                                initial_scene_checked = True
+                    if not initial_scene_checked:
+                        call_fn(
+                            "/wheels",
+                            "POST",
+                            {"left": 0.0, "right": 0.0, "duration": watchdog_dur},
+                        )
+                        time.sleep(0.015)
+                        if not seen:
+                            lost_streak = max(0, lost_streak - 1)
+                        yield_steps += 1
+                        continue
+
+            if in_narrow_corridor:
+                z_lo, z_hi = 0.15, 0.58
+                ox_gate = 1.01
+            elif confirmed_dynamic:
+                z_lo, z_hi = 0.14, 0.58
+                ox_gate = 0.74
+            else:
+                z_lo, z_hi = 0.18, 0.43
+                ox_gate = 0.72
+            for obs in obstacles:
+                cname = str(obs.get("color", ""))
+                ox = float(obs["offset_x"])
+                z_est = _estimate_obs_cam_dist_m(obs)
+                dox_dt = 0.0
+                if cname in prev_obs_state:
+                    pt, pox, _pz = prev_obs_state[cname]
+                    dt_obs = cur_sim_t - pt
+                    if dt_obs > 0.02:
+                        dox_dt = (
+                            (ox - pox) / dt_obs
+                            - (yaw_rate / FRONT_CAM_TAN_HALF_FOVX)
+                            - ox * (fwd_spd / max(0.25, z_est))
+                        )
+                    if (
+                        in_narrow_corridor
+                        and cname not in confirmed_static
+                        and dt_obs > 0.02
+                        and yaw_spd_abs < 0.20
+                        and abs(dox_dt) >= 0.32
+                    ):
+                        confirmed_dynamic.add(cname)
+                cur_obs_state[cname] = (cur_sim_t, ox, z_est)
+                if (
+                    (cname in confirmed_dynamic or ((bool(confirmed_dynamic) or in_narrow_corridor) and cname not in confirmed_static))
+                    and 0.22 <= z_est <= 1.35
+                    and (cname not in blind_wing_wait_since or z_est <= z_hi)
+                ):
+                    last_seen_dyn_rail[cname] = (cur_sim_t, cur_odom_m + z_est, ox, dox_dt)
+                    blind_wing_wait_since.pop(cname, None)
+
+                treat_as_dynamic = (cname in confirmed_dynamic) or (
+                    bool(confirmed_dynamic) and not in_narrow_corridor
+                )
+                inward_edge_obs = (
+                    (not in_narrow_corridor)
+                    and (0.14 <= z_est <= 0.60)
+                    and (abs(ox) <= 1.01)
+                    and (yaw_spd_abs < 0.10)
+                    and (ox * dox_dt < -0.12)
+                )
+                if (
+                    cname not in confirmed_static
+                    and ((z_lo <= z_est <= z_hi) or inward_edge_obs)
+                    and cur_odom_m >= commit_until_odom
+                ):
+                    if not treat_as_dynamic:
+                        if abs(ox) < ox_gate or inward_edge_obs:
+                            yield_brake = True
+                            min_yield_z = min(min_yield_z, z_est)
+                            if fwd_spd_abs < 0.04 and yaw_spd_abs < 0.08:
+                                if cname not in obs_probe_start:
+                                    obs_probe_start[cname] = (cur_sim_t, ox, min_front_rf)
+                                else:
+                                    t0, ox0, rf0 = obs_probe_start[cname]
+                                    if abs(ox - ox0) >= 0.018 or abs(min_front_rf - rf0) >= 0.015:
+                                        confirmed_dynamic.add(cname)
+                                        visual_yield_now = True
+                                    elif (cur_sim_t - t0) >= 0.45:
+                                        confirmed_static.add(cname)
+                                        yield_brake = False
+                    else:
+                        if in_narrow_corridor:
+                            pred_end = ox + dox_dt * 1.15
+                            receding = (
+                                (ox * dox_dt > 0.08)
+                                and (abs(ox) >= 0.76)
+                                and (min_front_rf > 0.60)
+                                and (fwd_spd_abs < 0.08)
+                                and (yaw_spd_abs < 0.10)
+                            )
+                            if (ox < 0.0 and 0.20 <= rf_l90 < 0.48) or (ox > 0.0 and 0.20 <= rf_r90 < 0.48):
+                                receding = False
+                            entering_from_edge = (abs(ox) <= 1.01) and (ox * dox_dt <= 0.05)
+                            blocked = (
+                                entering_from_edge
+                                or (abs(ox) < 0.80)
+                                or (abs(pred_end) < 0.78)
+                                or (ox * pred_end <= 0.0)
+                            )
+                        else:
+                            pred_end = ox + dox_dt * 1.45
+                            receding = (ox * dox_dt > 0.10) and (abs(ox) >= 0.64) and (yaw_spd_abs < 0.08)
+                            entering_from_edge = (abs(ox) <= 1.01) and (ox * dox_dt <= 0.05)
+                            blocked = (
+                                entering_from_edge
+                                or (abs(ox) < 0.74)
+                                or (abs(pred_end) < 0.74)
+                                or (ox * pred_end <= 0.0)
+                            )
+                        if blocked and not receding:
+                            yield_brake = True
+                            visual_yield_now = True
+                            min_yield_z = min(min_yield_z, z_est)
+
+            if not in_narrow_corridor and confirmed_dynamic and cur_odom_m >= commit_until_odom:
+                for cname, (last_t, rail_odom, last_ox, last_dox) in last_seen_dyn_rail.items():
+                    if cname in cur_obs_state and cur_obs_state[cname][2] <= z_hi:
+                        continue
+                    dist_to_rail = rail_odom - cur_odom_m
+                    dt_unseen = cur_sim_t - last_t
+                    just_receded_outward = (
+                        dt_unseen <= 1.35
+                        and abs(last_ox) <= 1.05
+                        and (
+                            (last_ox * last_dox > 0.08)
+                            or (was_visual_yielding and abs(last_ox) >= 0.78 and (last_ox * last_dox) >= -0.05)
+                        )
+                    )
+                    if 0.18 <= dist_to_rail <= 0.50 and not just_receded_outward and dt_unseen <= 12.0:
+                        w0 = blind_wing_wait_since.setdefault(cname, cur_sim_t)
+                        if (cur_sim_t - w0) <= 8.5:
+                            yield_brake = True
+
+            if (
+                confirmed_dynamic
+                and bool(obstacles)
+                and not target_is_close_center
+                and not (seen and not closer_center_obs and area_pct >= 3.5)
+                and cur_odom_m >= commit_until_odom
+                and min_front_rf < 0.42
+            ):
+                yield_brake = True
+                visual_yield_now = True
+
+            if not ever_seen and not seen and not in_narrow_corridor and confirmed_dynamic:
+                yield_brake = True
+
+            if was_visual_yielding and not yield_brake and confirmed_dynamic:
+                commit_until_odom = cur_odom_m + (0.82 if in_narrow_corridor else 0.72)
+            was_visual_yielding = visual_yield_now if yield_brake else False
+            prev_obs_state = cur_obs_state
+
+            if yield_brake:
+                if min_front_rf < 0.28 or min_yield_z < 0.26:
+                    left_w, right_w = -4.5, -4.5
+                elif confirmed_dynamic:
+                    left_w, right_w = 0.0, 0.0
+                else:
+                    if in_narrow_corridor:
+                        align = max(-1.2, min(1.2, 1.8 * offset_x)) if seen else 0.0
+                    else:
+                        align = max(-1.8, min(1.8, 2.2 * offset_x)) if seen else 0.0
+                    left_w, right_w = align, -align
+                call_fn(
+                    "/wheels",
+                    "POST",
+                    {"left": round(left_w, 4), "right": round(right_w, 4), "duration": watchdog_dur},
+                )
+                target_wall_dt = min(0.025, step_dt * 0.65) if not has_rate_estimate else (step_dt * 0.65) / sim_per_wall
+                time.sleep(max(0.006, target_wall_dt - (time.perf_counter() - t_iter_wall)))
+                if not seen and confirmed_dynamic:
+                    lost_streak = max(0, lost_streak - 1)
+                yield_steps += 1
+                continue
+
+            drive_steps += 1
+            steps_taken = drive_steps
+
+            if not confirmed_dynamic and not target_is_close_center and ((rf_c < 0.17 and min(rf_l, rf_r) < 0.20) or min(rf_c, rf_l, rf_r) < 0.15):
                 settled = _stop_and_settle(call_fn, include_vision=True)
                 stopped_cleanly = True
                 return {
@@ -739,7 +1110,12 @@ def approach_target(
 
             vis_repel = 0.0
             max_obs_threat = 0.0
-            if not (target_is_close_center and rf_c < 0.58):
+            if (
+                not (target_is_close_center and rf_c < 0.58)
+                and not confirmed_dynamic
+                and cur_odom_m >= commit_until_odom
+                and not in_narrow_corridor
+            ):
                 for obs in obstacles:
                     obs_x = float(obs["offset_x"])
                     obs_area = float(obs["area_pct"])
@@ -767,13 +1143,24 @@ def approach_target(
 
             rf_repel = 0.0
             side_close = False
-            if not (seen and offset_x < -0.42 and area_pct > 3.5) and rf_l < 0.65:
-                rf_repel += 5.0 * ((0.65 - rf_l) / 0.65)
-                side_close = side_close or (rf_l < 0.38)
-            if not (seen and offset_x > 0.42 and area_pct > 3.5) and rf_r < 0.65:
-                rf_repel -= 5.0 * ((0.65 - rf_r) / 0.65)
-                side_close = side_close or (rf_r < 0.38)
-            if not (target_is_close_center and rf_c < 0.45):
+            wall_corner = min(rf_l, rf_r) < 0.28 and min(rf_l90, rf_r90) < 0.32
+            ignore_open_dyn_flanks = bool(confirmed_dynamic) and not in_narrow_corridor and not wall_corner
+            ignore_diag_piston = in_narrow_corridor and rf_c > 0.65 and (
+                bool(confirmed_dynamic) or cur_odom_m < commit_until_odom or bool(obstacles)
+            )
+            if ignore_diag_piston:
+                if rf_l < 0.45:
+                    rf_repel += 2.5 * ((0.45 - rf_l) / 0.45)
+                if rf_r < 0.45:
+                    rf_repel -= 2.5 * ((0.45 - rf_r) / 0.45)
+            elif not ignore_open_dyn_flanks:
+                if not (seen and offset_x < -0.42 and area_pct > 3.5) and rf_l < 0.65:
+                    rf_repel += 5.0 * ((0.65 - rf_l) / 0.65)
+                    side_close = side_close or (rf_l < 0.38)
+                if not (seen and offset_x > 0.42 and area_pct > 3.5) and rf_r < 0.65:
+                    rf_repel -= 5.0 * ((0.65 - rf_r) / 0.65)
+                    side_close = side_close or (rf_r < 0.38)
+            if not (target_is_close_center and rf_c < 0.45) and not ignore_open_dyn_flanks:
                 l_flank = min(rf_l90, rf_l120 + 0.04)
                 r_flank = min(rf_r90, rf_r120 + 0.04)
                 if l_flank < 0.38:
@@ -795,7 +1182,20 @@ def approach_target(
                     attract_steer *= max(0.0, (r_wall_d - 0.21) / 0.10)
                     side_close = True
 
-            if not target_is_close_center and rf_c < 0.65:
+            if (
+                wide_corridor_latched
+                and rf_c > 0.65
+                and abs(offset_x) < 0.28
+                and min(rf_l, rf_r) >= 0.28
+                and min(rf_l90, rf_r90) >= 0.22
+            ):
+                rf_repel = max(-2.4, min(2.4, rf_repel))
+
+            if (
+                not target_is_close_center
+                and rf_c < 0.65
+                and not (confirmed_dynamic or cur_odom_m < commit_until_odom)
+            ):
                 if abs(vis_repel) > 0.25:
                     c_dir = 1.0 if vis_repel > 0.0 else -1.0
                 elif abs(rf_r - rf_l) > 0.04:
@@ -815,34 +1215,61 @@ def approach_target(
             )
             approach_dist_m = min(rf_c, opt_dist_m) if (seen and not closer_center_obs) else rf_c
 
-            if not target_is_close_center and (rf_c < 0.26 or min(rf_l, rf_r) < 0.21):
+            if not target_is_close_center and not confirmed_dynamic and (rf_c < 0.26 or min(rf_l, rf_r) < 0.21):
                 pivot_sign = 1.0 if (rf_repel + vis_repel) >= 0.0 else -1.0
                 pivot_w = pivot_sign * min(6.0, max(4.2, abs(rf_repel + vis_repel)))
                 left_w, right_w = pivot_w, -pivot_w
-            elif seen and abs(offset_x) > 0.48 and max_obs_threat < 0.25 and not side_close:
+            elif seen and abs(offset_x) > 0.48 and max_obs_threat < 0.25 and not side_close and cur_odom_m >= commit_until_odom:
                 steer = max(-6.0, min(6.0, attract_steer + vis_repel + rf_repel))
                 left_w = 1.6 + steer
                 right_w = 1.6 - steer
             else:
-                if (seen and not closer_center_obs) and approach_dist_m < stop_distance + 0.45:
+                straddling_dyn_rail = (
+                    (bool(confirmed_dynamic) or (in_narrow_corridor and bool(last_seen_dyn_rail)))
+                    and any(-0.38 <= (ro - cur_odom_m) <= 0.18 for _, ro, _, _ in last_seen_dyn_rail.values())
+                )
+                if (
+                    (seen and not closer_center_obs)
+                    and cur_odom_m >= commit_until_odom
+                    and (not straddling_dyn_rail or approach_dist_m < stop_distance + 0.14)
+                    and approach_dist_m < stop_distance + 0.45
+                ):
                     ramp = max(0.0, min(1.0, (approach_dist_m - stop_distance) / 0.45))
                     desired_speed_m_s = 0.10 + 0.25 * ramp  # Giảm tốc mượt 0.35 -> 0.10 m/s trước khi dừng
                     base_w = desired_speed_m_s / WHEEL_RADIUS
                     max_steer = min(6.5, max(2.2, base_w * 0.95))
+                elif (
+                    wide_corridor_latched
+                    and seen
+                    and not closer_center_obs
+                    and approach_dist_m >= stop_distance + 0.45
+                    and abs(offset_x) < 0.28
+                    and rf_c > 0.55
+                ):
+                    base_w = 13.0
+                    max_steer = 3.2
+                elif cur_odom_m < commit_until_odom or (confirmed_dynamic and (seen or lost_streak <= 6)):
+                    base_w = 13.5
+                    max_steer = 3.5
                 elif not seen:
                     odom_since_lost = cur_odom_m - (lost_start_odom_m if lost_start_odom_m is not None else cur_odom_m)
                     if last_offset_x >= 0.0:
                         target_side_clear = rf_r >= 0.48 and rf_r90 >= 0.36 and rf_r120 >= 0.34
                     else:
                         target_side_clear = rf_l >= 0.48 and rf_l90 >= 0.36 and rf_l120 >= 0.34
-                    if lost_streak >= 4 and odom_since_lost >= 0.45 and max_obs_threat < 0.15 and target_side_clear:
+                    if confirmed_dynamic and not in_narrow_corridor:
+                        base_w = 6.5
+                        attract_steer = 1.2 * last_offset_x
+                        max_steer = 2.5
+                    elif lost_streak >= 4 and odom_since_lost >= 0.45 and max_obs_threat < 0.15 and target_side_clear:
                         base_w = 1.6 if rf_c > 0.50 else 0.3
                         reacq_sign = 1.0 if last_offset_x >= 0.0 else -1.0
                         attract_steer = reacq_sign * max(3.2, 4.0 * abs(last_offset_x))
+                        max_steer = 6.5
                     else:
                         base_w = 4.2
                         attract_steer = 2.0 * last_offset_x
-                    max_steer = 6.5
+                        max_steer = 6.5
                 elif not (target_is_close_center and rf_c < 0.45) and (
                     min(rf_l90, rf_r90) < 0.26 or min(rf_l120, rf_r120) < 0.21
                 ):
@@ -854,6 +1281,13 @@ def approach_target(
                 else:
                     base_w = 7.0
                     max_steer = 6.5
+                near_uncommitted_obs = cur_odom_m >= commit_until_odom and any(
+                    str(o.get("color", "")) not in confirmed_static
+                    and _estimate_obs_cam_dist_m(o) <= 0.68
+                    for o in obstacles
+                )
+                if confirmed_dynamic and near_uncommitted_obs:
+                    base_w = min(base_w, 8.0)
                 steer = max(-max_steer, min(max_steer, attract_steer + vis_repel + rf_repel))
                 left_w = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, base_w + steer))
                 right_w = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, base_w - steer))
@@ -946,6 +1380,9 @@ def explore_maze(
     breadcrumbs: list[tuple[float, float, float, int]] = []
     last_crumb_odom = -999.0
     loop_mode = False
+    gate_commit_until_odom = -1.0
+    ignore_static_obs_until_odom = -1.0
+    gates_yielded = 0
 
     def _heading_idx(yaw_deg: float) -> int:
         return int(round((yaw_deg - base_yaw_deg) / 90.0)) % 4
@@ -1032,8 +1469,13 @@ def explore_maze(
         last_off = float(cur_vis["target"]["offset_x"])
         settled_end = _stop_and_settle(call_fn, include_vision=True)
         _sync_odom(settled_end)
-        if not settled_end["vision"]["target_visible"]:
-            rec_deg = -math.degrees(math.atan(last_off * FRONT_CAM_TAN_HALF_FOVX))
+        vis_end = settled_end["vision"]
+        need_recenter = (not vis_end["target_visible"]) or (
+            abs(float(vis_end["target"]["offset_x"])) > 0.55
+        )
+        if need_recenter:
+            aim_off = float(vis_end["target"]["offset_x"]) if vis_end["target_visible"] else last_off
+            rec_deg = -math.degrees(math.atan(aim_off * FRONT_CAM_TAN_HALF_FOVX))
             if abs(rec_deg) >= 0.8:
                 settled_end = closed_loop_turn(
                     call_fn,
@@ -1044,6 +1486,63 @@ def explore_maze(
                     release_stop=True,
                 )["after_status"]
                 _sync_odom(settled_end)
+        rf_end_s = settled_end["sensors"]["rangefinders_m"]
+        l90_e = float(rf_end_s.get("left90", 3.0))
+        r90_e = float(rf_end_s.get("right90", 3.0))
+        wall_e = min(l90_e, r90_e)
+        open_e = max(l90_e, r90_e)
+        if (
+            (gates_yielded > 0 or bool(settled_end["vision"].get("obstacles")))
+            and float(rf_end_s["center"]) > 0.90
+            and open_e > 0.85
+            and wall_e > 0.29
+        ):
+            tuck_sign = 1.0 if r90_e > l90_e else -1.0
+            tuck_ang = 30.0 if wall_e > 0.43 else 45.0
+            tuck_dist = 0.18 if wall_e > 0.43 else min(0.11, max(0.055, (wall_e - 0.265) / 0.707))
+            closed_loop_turn(
+                call_fn,
+                degrees=tuck_ang * tuck_sign,
+                max_speed_deg_s=120.0,
+                tol_deg=1.2,
+                include_vision=False,
+                release_stop=False,
+                fast_settle=True,
+            )
+            closed_loop_move(
+                call_fn,
+                meters=tuck_dist,
+                speed_m_s=0.20,
+                safety_stop_m=0.30,
+                include_vision=False,
+                release_stop=False,
+            )
+            settled_end = closed_loop_turn(
+                call_fn,
+                degrees=-tuck_ang * tuck_sign,
+                max_speed_deg_s=120.0,
+                tol_deg=1.0,
+                include_vision=True,
+                release_stop=True,
+            )["after_status"]
+            _sync_odom(settled_end)
+            if (
+                settled_end["vision"]["target_visible"]
+                and abs(float(settled_end["vision"]["target"]["offset_x"])) > 0.22
+            ):
+                fix_deg = -math.degrees(
+                    math.atan(float(settled_end["vision"]["target"]["offset_x"]) * FRONT_CAM_TAN_HALF_FOVX)
+                )
+                if abs(fix_deg) >= 0.8:
+                    settled_end = closed_loop_turn(
+                        call_fn,
+                        degrees=fix_deg,
+                        max_speed_deg_s=75.0,
+                        tol_deg=0.6,
+                        include_vision=True,
+                        release_stop=True,
+                    )["after_status"]
+                    _sync_odom(settled_end)
         if settled_end["vision"]["target_visible"]:
             return {
                 "target_found": True,
@@ -1052,6 +1551,7 @@ def explore_maze(
                 "steps": steps_taken,
                 "turns": turns_taken,
                 "loop_escaped": bool(loop_mode),
+                "gates_yielded": int(gates_yielded),
                 "after_status": _clean_status(settled_end),
             }
         return None
@@ -1067,7 +1567,20 @@ def explore_maze(
             return None
         c_dist = float(cur_rf["center"])
         flank_min = min(float(cur_rf.get("left90", 3.0)), float(cur_rf.get("right90", 3.0)))
-        if t_off < 0.32 or t_area >= 2.8 or c_dist < 0.80 or flank_min >= 0.50:
+        cur_obs = cur_vis.get("obstacles", [])
+        fg_obs = bool(cur_obs) and (
+            c_dist < 0.85
+            or any(_estimate_obs_cam_dist_m(o) < 0.85 for o in cur_obs)
+        )
+        # Do not mistake a foreground moving piston + distant peek in a narrow corridor for clear sight of target.
+        if fg_obs and t_area < 0.85 and flank_min < 0.50:
+            return None
+        effective_c_ok = (c_dist < 0.80) and not (cur_obs and t_area < 0.85 and flank_min < 0.50)
+        if (
+            (t_off < 0.32 and t_area >= 0.32)
+            or t_area >= 2.8
+            or (t_area >= 0.38 and (effective_c_ok or flank_min >= 0.50))
+        ):
             return _finish_target_seen(cur_vis)
         return None
 
@@ -1102,6 +1615,134 @@ def explore_maze(
         branch_turn_odom_m = None
         return cur_st
 
+    def _check_and_yield_dynamic_gate(
+        cur_st: dict, *, already_settled: bool = False
+    ) -> tuple[bool, dict | None, dict]:
+        nonlocal gate_commit_until_odom, ignore_static_obs_until_odom, gates_yielded
+        settled_gate = cur_st if already_settled else _fast_settle(include_vision=True)
+        done_now = _maybe_finish_target(settled_gate)
+        if done_now is not None:
+            return True, done_now, settled_gate
+
+        def _obs_sig(vis_dict: dict) -> dict[str, float]:
+            return {
+                str(o.get("color", "")): float(o["offset_x"])
+                for o in vis_dict.get("obstacles", [])
+            }
+
+        t0 = float(settled_gate.get("sim_time", 0.0))
+        obs0 = _obs_sig(settled_gate.get("vision", {}))
+        rf0_dict = settled_gate["sensors"]["rangefinders_m"]
+        rf0_min = min(float(rf0_dict["left"]), float(rf0_dict["center"]), float(rf0_dict["right"]))
+        is_dynamic = False
+        probe_st = settled_gate
+        probe_deadline = time.monotonic() + 2.5
+
+        while time.monotonic() < probe_deadline:
+            call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.35})
+            time.sleep(0.015)
+            probe_st = call_fn("/status?vision=1", "GET", None)
+            _sync_odom(probe_st)
+            done_now = _maybe_finish_target(probe_st)
+            if done_now is not None:
+                return True, done_now, probe_st
+
+            obs_cur = _obs_sig(probe_st.get("vision", {}))
+            rf_cur = probe_st["sensors"]["rangefinders_m"]
+            rf_cur_min = min(float(rf_cur["left"]), float(rf_cur["center"]), float(rf_cur["right"]))
+            if set(obs_cur.keys()) != set(obs0.keys()):
+                is_dynamic = True
+                break
+            if any(abs(obs_cur[k] - obs0[k]) >= 0.018 for k in obs_cur):
+                is_dynamic = True
+                break
+            if abs(rf_cur_min - rf0_min) >= 0.015:
+                is_dynamic = True
+                break
+            if (float(probe_st.get("sim_time", t0)) - t0) >= 0.42:
+                break
+
+        if not is_dynamic:
+            ignore_static_obs_until_odom = odom_m + 0.35
+            return False, None, probe_st
+
+        gates_yielded += 1
+        rf_p = probe_st["sensors"]["rangefinders_m"]
+        p_obs = probe_st.get("vision", {}).get("obstacles", [])
+        if min(float(rf_p["left"]), float(rf_p["center"]), float(rf_p["right"])) < 0.34 or any(
+            _estimate_obs_cam_dist_m(o) < 0.26 for o in p_obs
+        ):
+            probe_st = closed_loop_move(
+                call_fn,
+                meters=-0.10,
+                speed_m_s=0.25,
+                safety_stop_m=0.0,
+                include_vision=True,
+                release_stop=False,
+            )["after_status"]
+            _sync_odom(probe_st)
+            done_now = _maybe_finish_target(probe_st)
+            if done_now is not None:
+                return True, done_now, probe_st
+
+        wait_start_sim = float(probe_st.get("sim_time", 0.0))
+        wait_deadline = time.monotonic() + 20.0
+        clear_streak = 0
+        last_clear_sim_t = -999.0
+        wait_st = probe_st
+        prev_w_obs = _obs_sig(probe_st.get("vision", {}))
+
+        while time.monotonic() < wait_deadline and (float(wait_st.get("sim_time", wait_start_sim)) - wait_start_sim) < 10.5:
+            call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.35})
+            time.sleep(0.015)
+            wait_st = call_fn("/status?vision=1", "GET", None)
+            _sync_odom(wait_st)
+            done_now = _maybe_finish_target(wait_st)
+            if done_now is not None:
+                return True, done_now, wait_st
+
+            w_rf = wait_st["sensors"]["rangefinders_m"]
+            w_obs = wait_st.get("vision", {}).get("obstacles", [])
+            cur_w_obs = _obs_sig(wait_st.get("vision", {}))
+            obs_blocking_gate = False
+            nearest_gate_z = 0.45
+            for o in w_obs:
+                z_o = _estimate_obs_cam_dist_m(o)
+                if z_o <= 0.72:
+                    nearest_gate_z = min(nearest_gate_z, z_o)
+                    cn = str(o.get("color", ""))
+                    ox_w = float(o["offset_x"])
+                    if abs(ox_w) < 0.78:
+                        obs_blocking_gate = True
+                        break
+                    if cn in prev_w_obs:
+                        d_ox = ox_w - prev_w_obs[cn]
+                        if (ox_w * d_ox) <= 0.004:
+                            obs_blocking_gate = True
+                            break
+                    else:
+                        obs_blocking_gate = True
+                        break
+            prev_w_obs = cur_w_obs
+            gate_clear = (
+                float(w_rf["center"]) > 0.78
+                and min(float(w_rf["left"]), float(w_rf["right"])) > 0.38
+                and not obs_blocking_gate
+            )
+            cur_w_sim = float(wait_st.get("sim_time", wait_start_sim))
+            if gate_clear:
+                if clear_streak == 0 or (cur_w_sim - last_clear_sim_t) >= 0.08:
+                    clear_streak += 1
+                    last_clear_sim_t = cur_w_sim
+                if clear_streak >= 2:
+                    gate_commit_until_odom = odom_m + min(1.05, max(0.70, nearest_gate_z + 0.48))
+                    return True, None, wait_st
+            else:
+                clear_streak = 0
+
+        gate_commit_until_odom = odom_m + 0.50
+        return True, None, wait_st
+
     try:
         for step_idx in range(1, int(max_steps) + 1):
             steps_taken = step_idx
@@ -1135,6 +1776,19 @@ def explore_maze(
                 stopped_cleanly = True
                 return done
 
+            if odom_m >= gate_commit_until_odom and odom_m >= ignore_static_obs_until_odom:
+                early_dyn_obs = any(
+                    0.16 <= _estimate_obs_cam_dist_m(o) <= 0.65 and abs(float(o["offset_x"])) < 1.01
+                    for o in st.get("vision", {}).get("obstacles", [])
+                )
+                if early_dyn_obs:
+                    handled_dyn, done_dyn, st = _check_and_yield_dynamic_gate(st, already_settled=False)
+                    if done_dyn is not None:
+                        stopped_cleanly = True
+                        return done_dyn
+                    if handled_dyn:
+                        continue
+
             pref_90 = rf_r90 if pref_is_right else rf_l90
             other_90 = rf_l90 if pref_is_right else rf_r90
             pref_120 = rf_r120 if pref_is_right else rf_l120
@@ -1160,10 +1814,28 @@ def explore_maze(
                 branch_turn_odom_m = None
                 settled = _fast_settle(include_vision=True)
                 if settled["vision"].get("target_visible"):
-                    done = _finish_target_seen(settled["vision"])
+                    s_obs = settled["vision"].get("obstacles", [])
+                    s_t_area = float(settled["vision"]["target"]["area_pct"])
+                    if s_obs and s_t_area < 0.85:
+                        done = _maybe_finish_target(settled)
+                    else:
+                        done = _finish_target_seen(settled["vision"])
                     if done is not None:
                         stopped_cleanly = True
                         return done
+
+                if (
+                    odom_m >= gate_commit_until_odom
+                    and odom_m >= ignore_static_obs_until_odom
+                    and settled.get("vision", {}).get("obstacles")
+                ):
+                    handled_dyn, done_dyn, settled = _check_and_yield_dynamic_gate(settled, already_settled=True)
+                    if done_dyn is not None:
+                        stopped_cleanly = True
+                        return done_dyn
+                    if handled_dyn:
+                        st = settled
+                        continue
 
                 rf = settled["sensors"]["rangefinders_m"]
                 rf_l = float(rf["left"])
@@ -1287,9 +1959,9 @@ def explore_maze(
 
                 if branch_turn_odom_m is None and loop_mode and saw_other_wall and since_turn_m >= 0.28 and other_open:
                     adv_other = (
-                        max(0.0, min(0.30, (other_wall_edge_odom_m + 0.37) - odom_m))
+                        max(0.0, min(0.36, (other_wall_edge_odom_m + 0.43) - odom_m))
                         if has_120
-                        else 0.30
+                        else 0.34
                     )
                     jx, jy = _probe_xy(0.0, dist_m=adv_other)
                     pox, poy = _probe_xy(other_turn_deg, dist_m=0.72, origin_xy=(jx, jy))
@@ -1419,5 +2091,6 @@ def explore_maze(
         "steps": steps_taken,
         "turns": turns_taken,
         "loop_escaped": bool(loop_mode),
+        "gates_yielded": int(gates_yielded),
         "after_status": _clean_status(settled),
     }

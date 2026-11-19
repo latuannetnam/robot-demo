@@ -319,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     arena_group.add_argument(
         "--arena",
         default=None,
-        help="Tên địa hình khởi chạy: 2wheel (mặc định), maze_a (alias: maze), maze_b, maze_c",
+        help="Tên địa hình khởi chạy: 2wheel (mặc định), maze_a (alias: maze), maze_b, maze_c, dynamic_a (alias: dynamic), dynamic_b",
     )
     arena_group.add_argument(
         "--model",

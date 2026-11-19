@@ -20,6 +20,9 @@ from robot_sim.integrity import verify_arena_integrity
         ("maze_a", "maze_a", "arena_maze_a.xml"),
         ("maze_b", "maze_b", "arena_maze_b.xml"),
         ("maze_c", "maze_c", "arena_maze_c.xml"),
+        ("dynamic", "dynamic_a", "arena_dynamic_a.xml"),
+        ("dynamic_a", "dynamic_a", "arena_dynamic_a.xml"),
+        ("dynamic_b", "dynamic_b", "arena_dynamic_b.xml"),
     ],
 )
 def test_resolve_arena_aliases_and_verify_integrity(key, expected_id, expected_file):
@@ -47,10 +50,11 @@ def test_resolve_arena_rejects_unknown_name_and_outside_models_when_restricted(t
     assert identify_arena_id(custom_file) == "custom"
 
 
-def test_list_arenas_contains_all_four_maps():
+def test_list_arenas_contains_all_six_maps():
     catalog = list_arenas()
-    assert [item["id"] for item in catalog] == ["2wheel", "maze_a", "maze_b", "maze_c"]
+    assert [item["id"] for item in catalog] == ["2wheel", "maze_a", "maze_b", "maze_c", "dynamic_a", "dynamic_b"]
     assert "maze" in catalog[1]["aliases"]
+    assert "dynamic" in catalog[4]["aliases"]
     for item in catalog:
         assert "model_path" not in item
         assert "spawn_xy" not in item

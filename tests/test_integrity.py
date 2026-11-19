@@ -261,3 +261,33 @@ def test_verify_arena_integrity_rejects_unclassed_default_collision_disable_and_
     with pytest.raises(ValueError):
         verify_arena_integrity(bad_arena_site)
 
+
+@pytest.mark.parametrize("arena_id,arena_file", [("dynamic_a", "arena_dynamic_a.xml"), ("dynamic_b", "arena_dynamic_b.xml")])
+def test_verify_arena_integrity_validates_dynamic_obstacles_and_rejects_tampering(tmp_path: Path, arena_id: str, arena_file: str):
+    res = verify_arena_integrity(resolve_arena_model(arena_id))
+    assert res["valid"] is True
+    assert res["arena"] == arena_id
+
+    if arena_id == "dynamic_a":
+        cases = [
+            ('range="-1.35 1.35"', 'range="-0.35 0.35"'),
+            ('pos="-0.92 0.0 0.12"', 'pos="-1.40 0.0 0.12"'),
+            ('rgba="0.90 0.25 0.20 1"', 'rgba="0.90 0.25 0.20 0.2"'),
+            ('mass="8.0"', 'mass="0.5"'),
+        ]
+    else:
+        cases = [
+            ('<joint name="obs_red_slide" type="slide" axis="0 1 0" range="-0.50 0.50"/>', ""),
+            ('range="-0.45 0.45"', 'range="-0.90 0.90"'),
+        ]
+
+    for idx, (src, dst) in enumerate(cases):
+        case_dir = tmp_path / f"{arena_id}_{idx}"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        bad_arena, _ = _copy_arena_bundle(case_dir, arena_filename=arena_file, dst_name=arena_file)
+        xml = bad_arena.read_text(encoding="utf-8")
+        assert src in xml
+        bad_arena.write_text(xml.replace(src, dst, 1), encoding="utf-8")
+        with pytest.raises(ValueError):
+            verify_arena_integrity(bad_arena)
+

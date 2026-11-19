@@ -354,5 +354,71 @@ def test_spawn_relative_2d_odometry_tracks_turns_and_resets_cleanly():
         sim.close()
 
 
+def test_dynamic_obstacles_track_500hz_patrol_invalidate_vision_cache_and_count_contacts():
+    from robot_sim.arenas import ARENAS
+
+    spec = ARENAS["dynamic_a"]
+    sim = RobotSimulation(model_path="dynamic_a")
+    try:
+        assert sim._bindings.robot_qpos_adr == 0
+        assert sim.model.nq > 7
+        st0 = sim.get_status(include_vision=True)
+        assert st0["debug"]["arena"] == "dynamic_a"
+        assert st0["debug"]["contact_count"] == 0
+        assert st0["debug"]["in_contact"] is False
+        assert "contact_count" not in st0["sensors"]
+        assert "contact_count" not in st0
+        assert st0["debug"]["robot_xy"] == pytest.approx([-1.65, 0.0], abs=1e-3)
+
+        # Target placed inside a moving obstacle's sweep corridor must be rejected
+        with pytest.raises(ValueError):
+            sim.validate_target_xy((-0.92, 0.45))
+
+        v_samples = []
+        robot_q0 = sim.data.qpos[0:7].copy()
+        for _ in range(3):
+            sim.set_wheels(0.0, 0.0, duration=1.0)
+            sim.step_seconds(1.0)
+            t = float(sim.data.time)
+            # Robot stayed stationary while obstacles moved at 500 Hz
+            assert abs(float(sim.data.qpos[0] - robot_q0[0])) < 1e-3
+            for name, mspec in spec.moving_obstacles.items():
+                bid = sim.model.body(name).id
+                exp_x = mspec.base_pos[0] + mspec.slide_axis[0] * mspec.amplitude_m * math.sin(
+                    2.0 * math.pi * mspec.freq_hz * t + mspec.phase_rad
+                )
+                exp_y = mspec.base_pos[1] + mspec.slide_axis[1] * mspec.amplitude_m * math.sin(
+                    2.0 * math.pi * mspec.freq_hz * t + mspec.phase_rad
+                )
+                actual_xy = sim.data.xpos[bid][:2]
+                assert math.hypot(float(actual_xy[0]) - exp_x, float(actual_xy[1]) - exp_y) < 0.03
+            vis = sim.analyze_vision("front_cam")
+            for o in vis["obstacles"]:
+                assert o["v_span"] > 0.0
+            v_samples.append({o["color"]: o["offset_x"] for o in vis["obstacles"]})
+
+        # Vision cache must invalidate when obstacles move even if robot pose qpos[0:7] is static
+        common_colors = set(v_samples[0]).intersection(v_samples[1])
+        if common_colors:
+            c = next(iter(common_colors))
+            assert abs(v_samples[0][c] - v_samples[1][c]) > 0.05
+        else:
+            assert v_samples[0] != v_samples[1]
+
+        # Physical collision (backing straight into wall_west) increments debug.contact_count and resets cleanly
+        sim.set_wheels(-10.0, -10.0, duration=1.5)
+        sim.step_seconds(1.5)
+        st_hit = sim.get_status()
+        assert st_hit["debug"]["contact_count"] >= 1
+        assert st_hit["debug"]["contact_steps"] >= 1
+
+        st_reset = sim.reset()
+        assert st_reset["debug"]["contact_count"] == 0
+        assert st_reset["debug"]["contact_steps"] == 0
+        assert st_reset["debug"]["in_contact"] is False
+    finally:
+        sim.close()
+
+
 
 

@@ -238,7 +238,7 @@ def test_cli_arenas_and_status_hide_active_arena_without_debug_and_reload_switch
         raise err_holder[0]
 
     out_blind = results["arenas_blind"]
-    assert len(out_blind["arenas"]) == 4
+    assert len(out_blind["arenas"]) == 6
     assert "active_arena" not in out_blind
     assert "active_model" not in out_blind
     for entry in out_blind["arenas"]:

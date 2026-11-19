@@ -232,7 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_approach = sub.add_parser("approach", help="Tiếp cận mục tiêu xanh khép kín 20Hz kết hợp né hành lang vật cản")
     p_approach.add_argument("--stop-distance", type=float, default=0.25, help="Khoảng cách dừng trước đích (0.12..1.5m)")
-    p_approach.add_argument("--max-steps", type=int, default=120, help="Số nhịp điều khiển tối đa (mặc định: 120)")
+    p_approach.add_argument("--max-steps", type=int, default=160, help="Số nhịp điều khiển tối đa (mặc định: 160)")
     p_approach.add_argument("--step-dt", type=float, default=0.15, help="Chu kỳ mỗi nhịp điều khiển (giây)")
 
     p_explore = sub.add_parser(
@@ -266,7 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
     reload_group.add_argument(
         "--arena",
         default=None,
-        help="Chuyển sang địa hình chuẩn (2wheel, maze_a / maze, maze_b, maze_c)",
+        help="Chuyển sang địa hình chuẩn (2wheel, maze_a / maze, maze_b, maze_c, dynamic_a / dynamic, dynamic_b)",
     )
     reload_group.add_argument(
         "--model",

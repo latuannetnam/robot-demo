@@ -115,6 +115,8 @@ def record_telemetry(
 
     min_rf_m = 3.0
     near_collision_count = 0
+    base_contact_count: int | None = None
+    latest_contact_count = 0
     max_post_stop_speed = 0.0
     braking_rf_drop_m = 0.0
 
@@ -161,6 +163,7 @@ def record_telemetry(
                 dbg = st.get("debug", {})
                 if isinstance(dbg.get("arena"), str) and dbg["arena"]:
                     arena_id = dbg["arena"]
+                reset_jumped = False
                 curr_xy = dbg.get("robot_xy")
                 if isinstance(curr_xy, list) and len(curr_xy) == 2:
                     if start_xy is None:
@@ -173,8 +176,15 @@ def record_telemetry(
                         else:
                             start_xy = [float(curr_xy[0]), float(curr_xy[1])]
                             path_length_m = 0.0
+                            reset_jumped = True
                     prev_xy = [float(curr_xy[0]), float(curr_xy[1])]
                     end_xy = prev_xy
+
+                if "contact_count" in dbg:
+                    cur_cc = int(dbg["contact_count"])
+                    if base_contact_count is None or reset_jumped or cur_cc < latest_contact_count:
+                        base_contact_count = cur_cc
+                    latest_contact_count = cur_cc
 
                 if "robot_yaw_deg" in dbg:
                     end_yaw_deg = float(dbg["robot_yaw_deg"])
@@ -265,6 +275,7 @@ def record_telemetry(
         else None
     )
 
+    contact_count = max(0, latest_contact_count - (base_contact_count or 0))
     summary = {
         "started_at": started_iso,
         "arena": arena_id,
@@ -288,6 +299,7 @@ def record_telemetry(
         "goal_reached": goal_reached,
         "min_rangefinder_m": round(min_rf_m, 4) if sample_count > 0 else None,
         "near_collision_count": near_collision_count,
+        "contact_count": contact_count,
         "anomalies": {
             "braking_rf_drop_m": round(braking_rf_drop_m, 4),
             "max_post_stop_speed_m_s": round(max_post_stop_speed, 4),
