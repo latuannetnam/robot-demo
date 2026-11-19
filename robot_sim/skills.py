@@ -2931,7 +2931,7 @@ def cross_dynamic_gate(call_fn: BridgeCall, timeout_s: float = 12.0) -> dict:
 
         # Băng qua dứt điểm tối đa 1 cổng
         cross_start_odom = _sync_local_odom(wait_st)
-        commit_dist = min(1.05, max(0.72, nearest_gate_z + 0.48))
+        commit_dist = min(1.42, max(0.76, nearest_gate_z + 0.64))
         cur_st = wait_st
         stop_reason = "timeout"
         sprint_done = False
@@ -2970,7 +2970,7 @@ def cross_dynamic_gate(call_fn: BridgeCall, timeout_s: float = 12.0) -> dict:
                 stop_reason = "wall_ahead"
                 sprint_done = True
                 break
-            if moved_cross >= nearest_gate_z + 0.36 and (
+            if moved_cross >= nearest_gate_z + 0.54 and (
                 any(_estimate_obs_cam_dist_m(o) <= 0.56 and abs(float(o["offset_x"])) < 0.90 for o in c_obs)
                 or min(rf_l, rf_c, rf_r) < 0.44
             ):

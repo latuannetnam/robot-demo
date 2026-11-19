@@ -434,3 +434,19 @@ def test_advance_segment_2wheel_classifies_static_obstacle_without_dynamic_false
     assert result["res"]["event"] == "static_obstacle_ahead"
     assert result["res"]["obstacle"]["motion"] == "static"
     assert result["raw_debug"]["contact_count"] == 0
+
+
+def test_cross_dynamic_gate_parks_outside_piston_sweep_during_llm_think_pause():
+    def _park_after_gate1(call_fn, out: dict) -> None:
+        res = advance_segment(call_fn, max_dist=1.8, speed_m_s=0.52, step_dt=0.10)
+        assert res["event"] == "dynamic_gate_ahead"
+        g_res = cross_dynamic_gate(call_fn, timeout_s=12.0)
+        assert g_res["crossed"] is True
+        t_park0 = float(g_res["after_status"]["sim_time"])
+        while float(call_fn("/status", "GET")["sim_time"]) - t_park0 < 6.5:
+            call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.35})
+            time.sleep(0.02)
+        out["gate_res"] = g_res
+
+    result = _run_headless_episode("dynamic_b", _park_after_gate1)
+    assert result["raw_debug"]["contact_count"] == 0
