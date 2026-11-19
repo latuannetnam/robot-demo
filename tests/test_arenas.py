@@ -148,3 +148,19 @@ def test_maze_spawn_occludes_target_360_has_clear_corridor_and_reveals_at_final_
         assert st_reset["debug"]["target_xy"] == pytest.approx(exp_target, abs=1e-3)
     finally:
         sim.close()
+
+
+def test_arenas_define_positive_geodesic_reference_paths():
+    from robot_sim.arenas import ARENAS
+
+    expected = {
+        "2wheel": 0.96,
+        "maze_a": 4.22,
+        "maze_b": 6.50,
+        "maze_c": 3.39,
+        "dynamic_a": 2.88,
+        "dynamic_b": 3.16,
+    }
+    assert set(ARENAS) == set(expected)
+    for arena_id, ref_m in expected.items():
+        assert ARENAS[arena_id].reference_path_m == pytest.approx(ref_m, abs=1e-4)

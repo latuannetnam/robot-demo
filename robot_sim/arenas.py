@@ -56,6 +56,7 @@ class ArenaSpec:
     spawn_yaw_deg: float
     default_target_xy: tuple[float, float]
     moving_obstacles: dict[str, MovingObstacleSpec] = field(default_factory=dict)
+    reference_path_m: float = 0.0
 
 
 ARENAS: dict[str, ArenaSpec] = {
@@ -81,6 +82,7 @@ ARENAS: dict[str, ArenaSpec] = {
         spawn_xy=(0.0, 0.0),
         spawn_yaw_deg=0.0,
         default_target_xy=(1.4, 0.0),
+        reference_path_m=0.96,
     ),
     "maze_a": ArenaSpec(
         arena_id="maze_a",
@@ -102,6 +104,7 @@ ARENAS: dict[str, ArenaSpec] = {
         spawn_xy=(-1.5, -1.5),
         spawn_yaw_deg=0.0,
         default_target_xy=(1.5, 1.5),
+        reference_path_m=4.22,
     ),
     "maze_b": ArenaSpec(
         arena_id="maze_b",
@@ -128,6 +131,7 @@ ARENAS: dict[str, ArenaSpec] = {
         spawn_xy=(0.0, 0.0),
         spawn_yaw_deg=0.0,
         default_target_xy=(1.6, 1.6),
+        reference_path_m=6.50,
     ),
     "maze_c": ArenaSpec(
         arena_id="maze_c",
@@ -153,6 +157,7 @@ ARENAS: dict[str, ArenaSpec] = {
         spawn_xy=(0.0, 0.0),
         spawn_yaw_deg=-90.0,
         default_target_xy=(1.6, 1.6),
+        reference_path_m=3.39,
     ),
     "dynamic_a": ArenaSpec(
         arena_id="dynamic_a",
@@ -166,6 +171,7 @@ ARENAS: dict[str, ArenaSpec] = {
         spawn_xy=(-1.65, 0.0),
         spawn_yaw_deg=0.0,
         default_target_xy=(1.66, 0.0),
+        reference_path_m=2.88,
         moving_obstacles={
             "obs_red": MovingObstacleSpec(
                 "obs_red",
@@ -237,6 +243,7 @@ ARENAS: dict[str, ArenaSpec] = {
         spawn_xy=(-1.55, 0.0),
         spawn_yaw_deg=0.0,
         default_target_xy=(1.66, 1.00),
+        reference_path_m=3.16,
         moving_obstacles={
             "obs_red": MovingObstacleSpec(
                 "obs_red",

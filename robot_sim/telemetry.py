@@ -10,6 +10,7 @@ import time
 import urllib.error
 from urllib.parse import urlsplit
 
+from robot_sim.arenas import ARENAS
 from robot_sim.core import PROJECT_ROOT, _require_finite
 
 DEFAULT_TELEMETRY_PATH = PROJECT_ROOT / "captures" / "telemetry_latest.json"
@@ -102,6 +103,17 @@ def record_telemetry(
     last_error: str | None = None
     latencies_ms: list[float] = []
     active_samples = 0
+    active_drive_time_s = 0.0
+    agent_think_time_s = 0.0
+    prev_poll_wall: float | None = None
+    last_is_active = False
+    command_burst_count = 0
+    last_cell: tuple[int, int] | None = None
+    last_dir_cell: tuple[tuple[int, int], int] | None = None
+    cell_last_path: dict[tuple[int, int], float] = {}
+    dir_cell_last_path: dict[tuple[tuple[int, int], int], float] = {}
+    backtrack_revisit_count = 0
+    redundant_revisit_count = 0
 
     first_sim_t: float | None = None
     last_sim_t: float | None = None
@@ -144,6 +156,8 @@ def record_telemetry(
                 lat_ms = (time.perf_counter() - t0) * 1000.0
                 latencies_ms.append(lat_ms)
                 sample_count += 1
+                dt_sample = (t0 - prev_poll_wall) if prev_poll_wall is not None else max(0.0, t0 - t_wall_start)
+                prev_poll_wall = t0
 
                 sim_t = float(st["sim_time"])
                 if first_sim_t is None:
@@ -157,8 +171,15 @@ def record_telemetry(
                 fwd_spd = abs(float(sensors.get("forward_speed_m_s", 0.0)))
                 yaw_spd = abs(float(sensors.get("yaw_rate_rad_s", 0.0)))
 
-                if moving or fwd_spd > 0.02 or yaw_spd > 0.04:
+                is_active = bool(moving or fwd_spd > 0.02 or yaw_spd > 0.04)
+                if is_active:
                     active_samples += 1
+                    active_drive_time_s += dt_sample
+                else:
+                    agent_think_time_s += dt_sample
+                last_is_active = is_active
+                if moving and not prev_moving:
+                    command_burst_count += 1
 
                 dbg = st.get("debug", {})
                 if isinstance(dbg.get("arena"), str) and dbg["arena"]:
@@ -177,6 +198,12 @@ def record_telemetry(
                             start_xy = [float(curr_xy[0]), float(curr_xy[1])]
                             path_length_m = 0.0
                             reset_jumped = True
+                            cell_last_path.clear()
+                            dir_cell_last_path.clear()
+                            last_cell = None
+                            last_dir_cell = None
+                            backtrack_revisit_count = 0
+                            redundant_revisit_count = 0
                     prev_xy = [float(curr_xy[0]), float(curr_xy[1])]
                     end_xy = prev_xy
 
@@ -190,6 +217,23 @@ def record_telemetry(
                     end_yaw_deg = float(dbg["robot_yaw_deg"])
                 if "target_xy" in dbg:
                     target_xy = [float(dbg["target_xy"][0]), float(dbg["target_xy"][1])]
+
+                if isinstance(curr_xy, list) and len(curr_xy) == 2:
+                    cell = (round(float(curr_xy[0]) / 0.50), round(float(curr_xy[1]) / 0.50))
+                    if cell != last_cell:
+                        if cell in cell_last_path and (path_length_m - cell_last_path[cell]) >= 0.80:
+                            backtrack_revisit_count += 1
+                        last_cell = cell
+                    cell_last_path[cell] = path_length_m
+
+                    if end_yaw_deg is not None:
+                        dir_q = int(((end_yaw_deg + 45.0) % 360.0) // 90.0)
+                        dcell = (cell, dir_q)
+                        if dcell != last_dir_cell:
+                            if dcell in dir_cell_last_path and (path_length_m - dir_cell_last_path[dcell]) >= 0.80:
+                                redundant_revisit_count += 1
+                            last_dir_cell = dcell
+                        dir_cell_last_path[dcell] = path_length_m
 
                 vis = st.get("vision", {})
                 t_vis = bool(vis.get("target_visible", False))
@@ -247,7 +291,16 @@ def record_telemetry(
     except KeyboardInterrupt:
         pass
 
-    wall_time_s = max(1e-4, time.perf_counter() - t_wall_start)
+    t_wall_end = time.perf_counter()
+    wall_time_s = max(1e-4, t_wall_end - t_wall_start)
+    if sample_count > 0 and prev_poll_wall is not None:
+        tail_dt = max(0.0, t_wall_end - prev_poll_wall)
+        if error_count > 0:
+            tail_dt = min(period, tail_dt)
+        if last_is_active:
+            active_drive_time_s += tail_dt
+        else:
+            agent_think_time_s += tail_dt
     sim_time_s = max(0.0, (last_sim_t - first_sim_t)) if (first_sim_t is not None and last_sim_t is not None) else 0.0
 
     lat_sorted = sorted(latencies_ms)
@@ -276,23 +329,51 @@ def record_telemetry(
     )
 
     contact_count = max(0, latest_contact_count - (base_contact_count or 0))
+    arena_spec = ARENAS.get(arena_id or "")
+    reference_path_m = (
+        round(arena_spec.reference_path_m, 4)
+        if (
+            arena_spec is not None
+            and arena_spec.reference_path_m > 0.0
+            and target_xy is not None
+            and math.hypot(
+                target_xy[0] - arena_spec.default_target_xy[0],
+                target_xy[1] - arena_spec.default_target_xy[1],
+            )
+            <= 0.05
+        )
+        else None
+    )
+    path_efficiency = (
+        round(min(1.0, reference_path_m / path_length_m), 3)
+        if (reference_path_m is not None and goal_reached and path_length_m > 0.0)
+        else None
+    )
     summary = {
         "started_at": started_iso,
         "arena": arena_id,
         "wall_time_s": round(wall_time_s, 2),
         "sim_time_s": round(sim_time_s, 2),
+        "active_drive_time_s": round(active_drive_time_s, 2),
+        "agent_think_time_s": round(agent_think_time_s, 2),
         "realtime_ratio": round(sim_time_s / wall_time_s, 3) if sim_time_s > 0 else 0.0,
         "sample_count": sample_count,
         "error_count": error_count,
         "last_error": last_error,
         "http_latency_ms": http_lat,
         "duty_cycle_pct": round((100.0 * active_samples) / sample_count, 1) if sample_count > 0 else 0.0,
+        "command_burst_count": command_burst_count,
+        "unique_cells_visited": len(cell_last_path),
+        "backtrack_revisit_count": backtrack_revisit_count,
+        "redundant_revisit_count": redundant_revisit_count,
         "start_xy": start_xy,
         "end_xy": end_xy,
         "end_yaw_deg": end_yaw_deg,
         "target_xy": target_xy,
         "center_to_target_m": center_to_target_m,
         "path_length_m": round(path_length_m, 4),
+        "reference_path_m": reference_path_m,
+        "path_efficiency": path_efficiency,
         "final_rf_center_m": final_rf_center,
         "final_target_visible": final_target_visible,
         "final_target_offset_x": final_target_offset_x,

@@ -203,3 +203,112 @@ def test_fetch_raw_status_recovers_from_stale_keepalive_connection():
     assert accepted["n"] == 2
 
 
+def test_telemetry_cognitive_metrics_directed_revisits_and_custom_target(tmp_path: Path, monkeypatch):
+    import pytest
+    from robot_sim.telemetry import record_telemetry
+
+    out_json = tmp_path / "cog_telemetry.json"
+    stop_file = tmp_path / ".cog_stop"
+    # Sequence:
+    # 1) Hub (-1.5, 0.0) W -> N dead-end #1 (>=0.8m) -> return (-1.5, 0.0) facing S (0 redundant)
+    # 2) N->S dead-end #2 (>=0.8m) -> return (-1.5, 0.0) facing N and pause/think (0 redundant)
+    # 3) Backtrack / re-enter (-1.5, 0.0) facing W a 2nd time -> redundant_revisit_count == 1
+    # 4) Travel continuously to dynamic_a target (1.66, 0.0)
+    continuous_trace = [
+        # (moving, fwd_spd, xy, yaw_deg, target_vis, off_x, rf_c, target_xy)
+        (False, 0.0, [-1.50, 0.00], 180.0, False, None, 1.5, [1.66, 0.0]),  # think 1
+        (True,  0.3, [-1.50, 0.00], 180.0, False, None, 1.5, [1.66, 0.0]),  # burst 1: cell (-3,0) dir W (#1)
+        (True,  0.4, [-1.50, 0.45],  90.0, False, None, 1.2, [1.66, 0.0]),
+        (True,  0.4, [-1.50, 0.90],  90.0, False, None, 0.8, [1.66, 0.0]),
+        (True,  0.4, [-1.50, 0.45], -90.0, False, None, 1.2, [1.66, 0.0]),
+        (False, 0.0, [-1.50, 0.00], -90.0, False, None, 1.5, [1.66, 0.0]),  # backtrack 1 -> (-3,0) dir S (#1), think 2
+        (True,  0.4, [-1.50, -0.45], -90.0, False, None, 1.2, [1.66, 0.0]), # burst 2
+        (True,  0.4, [-1.50, -0.90], -90.0, False, None, 0.8, [1.66, 0.0]),
+        (True,  0.4, [-1.50, -0.45],  90.0, False, None, 1.2, [1.66, 0.0]),
+        (False, 0.0, [-1.50, 0.00],  90.0, False, None, 1.5, [1.66, 0.0]),  # backtrack 2 -> (-3,0) dir N (#1), think 3
+        (True,  0.4, [-1.15, 0.00],   0.0, False, None, 1.5, [1.66, 0.0]),  # burst 3
+        (True,  0.3, [-1.50, 0.00], 180.0, False, None, 1.5, [1.66, 0.0]),  # revisit (-3,0) dir W (#2, >=0.8m from t=0) -> redundant = 1
+        (True,  0.4, [-1.15, 0.00],   0.0, False, None, 1.5, [1.66, 0.0]),
+        (True,  0.4, [-0.80, 0.00],   0.0, False, None, 1.5, [1.66, 0.0]),
+        (True,  0.4, [-0.45, 0.00],   0.0, False, None, 1.5, [1.66, 0.0]),
+        (True,  0.4, [-0.10, 0.00],   0.0, False, None, 1.5, [1.66, 0.0]),
+        (True,  0.4, [0.25,  0.00],   0.0, False, None, 1.2, [1.66, 0.0]),
+        (True,  0.4, [0.60,  0.00],   0.0, False, None, 0.9, [1.66, 0.0]),
+        (True,  0.4, [0.95,  0.00],   0.0, False, None, 0.5, [1.66, 0.0]),
+        (False, 0.0, [1.22,  0.00],   0.0, True,  0.02, 0.25, [1.66, 0.0]),
+    ]
+    idx = 0
+
+    def fake_fetch(_url: str, timeout: float = 4.0) -> dict:
+        nonlocal idx
+        m, spd, xy, yaw, tv, ox, rfc, txy = continuous_trace[idx]
+        idx += 1
+        if idx >= len(continuous_trace):
+            stop_file.write_text("stop\n", encoding="utf-8")
+        return {
+            "sim_time": 0.2 * idx,
+            "moving": m,
+            "sensors": {
+                "rangefinders_m": {"left": 1.0, "center": rfc, "right": 1.0},
+                "forward_speed_m_s": spd,
+                "yaw_rate_rad_s": 0.0,
+            },
+            "vision": {
+                "target_visible": tv,
+                "target": {"offset_x": ox, "area_pct": 20.0} if tv else None,
+                "obstacles": [],
+            },
+            "debug": {
+                "arena": "dynamic_a",
+                "robot_xy": xy,
+                "robot_yaw_deg": yaw,
+                "target_xy": txy,
+                "contact_count": 0,
+            },
+        }
+
+    monkeypatch.setattr("robot_sim.telemetry._fetch_raw_status", fake_fetch)
+    s1 = record_telemetry("http://127.0.0.1:8765", out_path=out_json, stop_flag_path=stop_file, hz=50.0)
+    assert s1["goal_reached"] is True
+    assert s1["command_burst_count"] == 3
+    assert s1["backtrack_revisit_count"] >= 2
+    assert s1["redundant_revisit_count"] == 1
+    assert s1["unique_cells_visited"] >= 5
+    assert s1["reference_path_m"] == 2.88
+    assert s1["path_efficiency"] == pytest.approx(round(min(1.0, 2.88 / s1["path_length_m"]), 3), abs=1e-3)
+    assert s1["active_drive_time_s"] > 0.0
+    assert s1["agent_think_time_s"] > 0.0
+    assert abs((s1["active_drive_time_s"] + s1["agent_think_time_s"]) - s1["wall_time_s"]) <= 0.15
+
+    # Test B: custom target_xy (> 0.05m from default_target_xy) -> reference_path_m and path_efficiency are None
+    # + verify reset_jumped clears old cell visit history
+    out_json2 = tmp_path / "custom_target.json"
+    stop_file2 = tmp_path / ".custom_stop"
+    custom_trace = [
+        (True, 0.2, [0.0, 0.0], 0.0, False, None, 1.0, [0.5, 0.9]),
+        (True, 0.2, [0.0, 0.9], 0.0, False, None, 1.0, [0.5, 0.9]),
+        (False, 0.0, [0.1, 0.9], 0.0, True, 0.01, 0.25, [0.5, 0.9]),
+    ]
+    c_idx = 0
+
+    def fake_fetch_custom(_url: str, timeout: float = 4.0) -> dict:
+        nonlocal c_idx
+        m, spd, xy, yaw, tv, ox, rfc, txy = custom_trace[c_idx]
+        c_idx += 1
+        if c_idx >= len(custom_trace):
+            stop_file2.write_text("stop\n", encoding="utf-8")
+        return {
+            "sim_time": 0.2 * c_idx,
+            "moving": m,
+            "sensors": {"rangefinders_m": {"center": rfc}, "forward_speed_m_s": spd, "yaw_rate_rad_s": 0.0},
+            "vision": {"target_visible": tv, "target": {"offset_x": ox, "area_pct": 20.0} if tv else None, "obstacles": []},
+            "debug": {"arena": "dynamic_a", "robot_xy": xy, "robot_yaw_deg": yaw, "target_xy": txy, "contact_count": 0},
+        }
+
+    monkeypatch.setattr("robot_sim.telemetry._fetch_raw_status", fake_fetch_custom)
+    s2 = record_telemetry("http://127.0.0.1:8765", out_path=out_json2, stop_flag_path=stop_file2, hz=50.0)
+    assert s2["reference_path_m"] is None
+    assert s2["path_efficiency"] is None
+    assert s2["redundant_revisit_count"] == 0
+
+
