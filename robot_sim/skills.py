@@ -1486,63 +1486,9 @@ def explore_maze(
                     release_stop=True,
                 )["after_status"]
                 _sync_odom(settled_end)
-        rf_end_s = settled_end["sensors"]["rangefinders_m"]
-        l90_e = float(rf_end_s.get("left90", 3.0))
-        r90_e = float(rf_end_s.get("right90", 3.0))
-        wall_e = min(l90_e, r90_e)
-        open_e = max(l90_e, r90_e)
-        if (
-            (gates_yielded > 0 or bool(settled_end["vision"].get("obstacles")))
-            and float(rf_end_s["center"]) > 0.90
-            and open_e > 0.85
-            and wall_e > 0.29
-        ):
-            tuck_sign = 1.0 if r90_e > l90_e else -1.0
-            tuck_ang = 30.0 if wall_e > 0.43 else 45.0
-            tuck_dist = 0.18 if wall_e > 0.43 else min(0.11, max(0.055, (wall_e - 0.265) / 0.707))
-            closed_loop_turn(
-                call_fn,
-                degrees=tuck_ang * tuck_sign,
-                max_speed_deg_s=120.0,
-                tol_deg=1.2,
-                include_vision=False,
-                release_stop=False,
-                fast_settle=True,
-            )
-            closed_loop_move(
-                call_fn,
-                meters=tuck_dist,
-                speed_m_s=0.20,
-                safety_stop_m=0.30,
-                include_vision=False,
-                release_stop=False,
-            )
-            settled_end = closed_loop_turn(
-                call_fn,
-                degrees=-tuck_ang * tuck_sign,
-                max_speed_deg_s=120.0,
-                tol_deg=1.0,
-                include_vision=True,
-                release_stop=True,
-            )["after_status"]
+        if gates_yielded > 0 or bool(settled_end["vision"].get("obstacles")):
+            settled_end = _apply_asymmetric_shaft_tuck(call_fn, settled_end, re_center_target=True)
             _sync_odom(settled_end)
-            if (
-                settled_end["vision"]["target_visible"]
-                and abs(float(settled_end["vision"]["target"]["offset_x"])) > 0.22
-            ):
-                fix_deg = -math.degrees(
-                    math.atan(float(settled_end["vision"]["target"]["offset_x"]) * FRONT_CAM_TAN_HALF_FOVX)
-                )
-                if abs(fix_deg) >= 0.8:
-                    settled_end = closed_loop_turn(
-                        call_fn,
-                        degrees=fix_deg,
-                        max_speed_deg_s=75.0,
-                        tol_deg=0.6,
-                        include_vision=True,
-                        release_stop=True,
-                    )["after_status"]
-                    _sync_odom(settled_end)
         if settled_end["vision"]["target_visible"]:
             return {
                 "target_found": True,
@@ -2094,3 +2040,1100 @@ def explore_maze(
         "gates_yielded": int(gates_yielded),
         "after_status": _clean_status(settled),
     }
+
+
+def _apply_asymmetric_shaft_tuck(
+    call_fn: BridgeCall,
+    settled_st: dict,
+    *,
+    re_center_target: bool = True,
+) -> dict:
+    """Nép nhẹ khỏi mép tường hẹp sang phía rộng khi dừng tại miệng hành lang bất đối xứng."""
+    rf_end = settled_st["sensors"]["rangefinders_m"]
+    l90_e = float(rf_end.get("left90", 3.0))
+    r90_e = float(rf_end.get("right90", 3.0))
+    wall_e = min(l90_e, r90_e)
+    open_e = max(l90_e, r90_e)
+    if not (float(rf_end["center"]) > 0.90 and open_e > 0.85 and 0.29 < wall_e < 0.65):
+        return settled_st
+    tuck_sign = 1.0 if r90_e > l90_e else -1.0
+    tuck_ang = 30.0 if wall_e > 0.43 else 45.0
+    tuck_dist = 0.18 if wall_e > 0.43 else min(0.11, max(0.055, (wall_e - 0.265) / 0.707))
+    closed_loop_turn(
+        call_fn,
+        degrees=tuck_ang * tuck_sign,
+        max_speed_deg_s=120.0,
+        tol_deg=1.2,
+        include_vision=False,
+        release_stop=False,
+        fast_settle=True,
+    )
+    closed_loop_move(
+        call_fn,
+        meters=tuck_dist,
+        speed_m_s=0.20,
+        safety_stop_m=0.30,
+        include_vision=False,
+        release_stop=False,
+    )
+    out_st = closed_loop_turn(
+        call_fn,
+        degrees=-tuck_ang * tuck_sign,
+        max_speed_deg_s=120.0,
+        tol_deg=1.0,
+        include_vision=True,
+        release_stop=True,
+    )["after_status"]
+    if (
+        re_center_target
+        and out_st["vision"].get("target_visible")
+        and abs(float(out_st["vision"]["target"]["offset_x"])) > 0.22
+    ):
+        fix_deg = -math.degrees(
+            math.atan(float(out_st["vision"]["target"]["offset_x"]) * FRONT_CAM_TAN_HALF_FOVX)
+        )
+        if abs(fix_deg) >= 0.8:
+            out_st = closed_loop_turn(
+                call_fn,
+                degrees=fix_deg,
+                max_speed_deg_s=75.0,
+                tol_deg=0.6,
+                include_vision=True,
+                release_stop=True,
+            )["after_status"]
+    return out_st
+
+
+def compute_open_branches(rf: dict[str, float]) -> list[str]:
+    """Liệt kê các nhánh rẽ mở tại vị trí hiện tại theo thứ tự ['left', 'straight', 'right']."""
+    rf_c = float(rf.get("center", 0.0))
+    rf_l = float(rf.get("left", rf_c))
+    rf_r = float(rf.get("right", rf_c))
+    rf_l90 = float(rf.get("left90", 0.0))
+    rf_r90 = float(rf.get("right90", 0.0))
+    branches: list[str] = []
+    if rf_l90 > 0.55:
+        branches.append("left")
+    if rf_c > 0.62 and min(rf_l, rf_r) > 0.34:
+        branches.append("straight")
+    if rf_r90 > 0.55:
+        branches.append("right")
+    return branches
+
+
+def _obs_signature(vis_dict: dict) -> dict[str, float]:
+    return {
+        str(o.get("color", "")): float(o["offset_x"])
+        for o in vis_dict.get("obstacles", [])
+    }
+
+
+def _corridor_heading_bias(rf: dict[str, float], in_narrow: bool) -> float:
+    """Tính góc hiệu chỉnh giữ tâm hành lang và chống quẹt mũi/sườn từ các tia sonar."""
+    rf_l = float(rf["left"])
+    rf_r = float(rf["right"])
+    rf_l90 = float(rf.get("left90", 3.0))
+    rf_r90 = float(rf.get("right90", 3.0))
+    bias = 0.0
+    if rf_l90 < 0.65 and rf_r90 < 0.65:
+        bias += max(-10.0, min(10.0, 26.0 * (rf_l90 - rf_r90)))
+    else:
+        if rf_l90 < 0.32:
+            bias -= min(15.0, 70.0 * (0.32 - rf_l90))
+        if rf_r90 < 0.32:
+            bias += min(15.0, 70.0 * (0.32 - rf_r90))
+    if in_narrow:
+        rf_l120 = float(rf.get("left120", 3.0))
+        rf_r120 = float(rf.get("right120", 3.0))
+        if rf_l120 < 0.24:
+            bias -= min(12.0, 55.0 * (0.24 - rf_l120))
+        if rf_r120 < 0.24:
+            bias += min(12.0, 55.0 * (0.24 - rf_r120))
+    if rf_l < 0.36 and rf_r > rf_l + 0.05:
+        bias -= min(10.0, 28.0 * (0.36 - rf_l))
+    if rf_r < 0.36 and rf_l > rf_r + 0.05:
+        bias += min(10.0, 28.0 * (0.36 - rf_r))
+    return max(-18.0, min(18.0, bias))
+
+
+def _summarize_obstacle(obs_candidates: list[dict], motion: str) -> dict | None:
+    if not obs_candidates:
+        return None
+    best = min(obs_candidates, key=_estimate_obs_cam_dist_m)
+    return {
+        "color": str(best.get("color", "")),
+        "offset_x": round(float(best.get("offset_x", 0.0)), 4),
+        "area_pct": round(float(best.get("area_pct", 0.0)), 4),
+        "est_dist_m": round(_estimate_obs_cam_dist_m(best), 3),
+        "motion": motion,
+    }
+
+
+def _probe_front_obstacle_motion(
+    call_fn: BridgeCall,
+    initial_st: dict,
+    z_limit: float = 0.85,
+) -> tuple[str, dict, dict | None]:
+    """Đứng yên <= 0.42 s sim-time để phân loại vật cản phía trước ('dynamic' | 'static' | 'none')."""
+    vis0 = initial_st.get("vision", {})
+    obs0_list = vis0.get("obstacles", [])
+    rf0 = initial_st["sensors"]["rangefinders_m"]
+    rf0_min = min(float(rf0["left"]), float(rf0["center"]), float(rf0["right"]))
+
+    relevant = [
+        o
+        for o in obs0_list
+        if _estimate_obs_cam_dist_m(o) <= z_limit and abs(float(o.get("offset_x", 0.0))) < 0.95
+    ]
+    if not relevant and not (obs0_list and rf0_min < 0.72):
+        return "none", initial_st, None
+
+    obs0 = _obs_signature(vis0)
+    obs_min = dict(obs0)
+    obs_max = dict(obs0)
+    t0 = float(initial_st.get("sim_time", 0.0))
+    probe_st = initial_st
+    motion = "static"
+    deadline = time.monotonic() + 2.5
+    stagnant_polls = 0
+    prev_sim = t0
+
+    for _ in range(40):
+        if time.monotonic() >= deadline:
+            break
+        call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.25})
+        time.sleep(0.012)
+        probe_st = call_fn("/status?vision=1", "GET", None)
+        obs_cur = _obs_signature(probe_st.get("vision", {}))
+        rf_cur = probe_st["sensors"]["rangefinders_m"]
+        rf_cur_min = min(float(rf_cur["left"]), float(rf_cur["center"]), float(rf_cur["right"]))
+
+        if set(obs_cur.keys()) != set(obs0.keys()):
+            motion = "dynamic"
+            break
+        for k, val in obs_cur.items():
+            obs_min[k] = min(obs_min.get(k, val), val)
+            obs_max[k] = max(obs_max.get(k, val), val)
+        if any((obs_max[k] - obs_min[k]) >= 0.010 for k in obs_cur):
+            motion = "dynamic"
+            break
+        if abs(rf_cur_min - rf0_min) >= 0.015:
+            motion = "dynamic"
+            break
+
+        cur_sim = float(probe_st.get("sim_time", t0))
+        if (cur_sim - t0) >= 0.85:
+            break
+        if abs(cur_sim - prev_sim) < 1e-6:
+            stagnant_polls += 1
+            if stagnant_polls >= 3:
+                break
+        else:
+            stagnant_polls = 0
+        prev_sim = cur_sim
+
+    obs_latest = probe_st.get("vision", {}).get("obstacles", [])
+    src_obs = obs_latest or obs0_list
+    return motion, probe_st, _summarize_obstacle(src_obs, motion)
+
+
+def _is_target_ready_for_dock(st: dict) -> bool:
+    vis = st.get("vision", {})
+    if not vis.get("target_visible") or not isinstance(vis.get("target"), dict):
+        return False
+    t_off = float(vis["target"]["offset_x"])
+    t_area = float(vis["target"]["area_pct"])
+    rf_c = float(st["sensors"]["rangefinders_m"]["center"])
+    obs = vis.get("obstacles", [])
+    closer_obs = any(
+        float(o["area_pct"]) > max(1.0, t_area * 1.2) and abs(float(o["offset_x"])) < 0.45
+        for o in obs
+    )
+    fg_obs = any(
+        _estimate_obs_cam_dist_m(o) < 0.85 and abs(float(o.get("offset_x", 0.0))) < 0.90
+        for o in obs
+    )
+    if closer_obs:
+        return False
+    if t_area >= 6.0 and not fg_obs:
+        return True
+    if abs(t_off) >= 0.45:
+        return False
+    return (t_area >= 1.2 and rf_c <= 0.95 and not fg_obs) or (t_area >= 0.45 and rf_c <= 0.85 and not fg_obs)
+
+
+def _glance_open_wings_for_dynamic_gate(
+    call_fn: BridgeCall,
+    st: dict,
+    yaw0_deg: float,
+) -> tuple[bool, dict, dict | None, bool]:
+    """Liếc nhanh ±32° trong không gian mở để phát hiện vật cản động đang ở ngoài góc nhìn chính diện."""
+    found_dyn: dict | None = None
+    approaching_center = False
+    cur_st = st
+
+    def _lat_map(obs_list: list[dict], yaw_deg: float) -> dict[str, float]:
+        d_rad = math.radians(_wrap_angle_deg(yaw_deg - yaw0_deg))
+        out: dict[str, float] = {}
+        for o in obs_list:
+            z = _estimate_obs_cam_dist_m(o)
+            y_c = -float(o["offset_x"]) * z * FRONT_CAM_TAN_HALF_FOVX
+            out[str(o.get("color", ""))] = z * math.sin(d_rad) + y_c * math.cos(d_rad)
+        return out
+
+    for sign in (1.0, -1.0):
+        cur_y = float(cur_st["sensors"]["gyro_yaw_deg"])
+        delta = _wrap_angle_deg((yaw0_deg + 32.0 * sign) - cur_y)
+        st_a = (
+            closed_loop_turn(
+                call_fn,
+                degrees=delta,
+                max_speed_deg_s=220.0,
+                tol_deg=1.8,
+                include_vision=True,
+                release_stop=False,
+                fast_settle=True,
+            )["after_status"]
+            if abs(delta) >= 1.0
+            else call_fn("/status?vision=1", "GET", None)
+        )
+        t_a = float(st_a.get("sim_time", 0.0))
+        st_b = st_a
+        obs_a = _obs_signature(st_a.get("vision", {}))
+        obs_a_list = st_a.get("vision", {}).get("obstacles", [])
+        lat_a_map = _lat_map(obs_a_list, float(st_a["sensors"]["gyro_yaw_deg"]))
+        dwell_s = 0.42 if obs_a_list else 0.16
+        w_deadline = time.monotonic() + 1.5
+        for _ in range(25):
+            if time.monotonic() >= w_deadline or (float(st_b.get("sim_time", t_a)) - t_a) >= dwell_s:
+                break
+            call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.25})
+            time.sleep(0.012)
+            st_b = call_fn("/status?vision=1", "GET", None)
+            if obs_a_list:
+                obs_cur_map = _obs_signature(st_b.get("vision", {}))
+                if any(
+                    cn not in obs_a or abs(obs_cur_map[cn] - obs_a[cn]) >= 0.015
+                    for cn in obs_cur_map
+                ):
+                    break
+        cur_st = st_b
+        obs_b_list = st_b.get("vision", {}).get("obstacles", [])
+        obs_b = _obs_signature(st_b.get("vision", {}))
+        d_yaw_rad = math.radians(_wrap_angle_deg(float(st_b["sensors"]["gyro_yaw_deg"]) - yaw0_deg))
+        for o_b in obs_b_list:
+            zb = _estimate_obs_cam_dist_m(o_b)
+            ox_b = float(o_b["offset_x"])
+            y_cam_b = -ox_b * zb * FRONT_CAM_TAN_HALF_FOVX
+            fwd_b = zb * math.cos(d_yaw_rad) - y_cam_b * math.sin(d_yaw_rad)
+            lat_b = zb * math.sin(d_yaw_rad) + y_cam_b * math.cos(d_yaw_rad)
+            cn = str(o_b.get("color", ""))
+            moved_sideways = (cn not in obs_a) or abs(obs_b.get(cn, ox_b) - obs_a.get(cn, ox_b)) >= 0.015
+            if moved_sideways and 0.14 <= fwd_b <= 1.05 and abs(lat_b) <= 1.40:
+                found_dyn = _summarize_obstacle([o_b], "dynamic")
+                if cn not in lat_a_map or abs(lat_b) < abs(lat_a_map[cn]) - 0.008 or abs(lat_b) <= 0.65:
+                    approaching_center = True
+                break
+        if found_dyn is not None:
+            break
+
+    cur_y_end = float(call_fn("/status", "GET", None)["sensors"]["gyro_yaw_deg"])
+    back_deg = _wrap_angle_deg(yaw0_deg - cur_y_end)
+    if abs(back_deg) >= 0.8:
+        cur_st = closed_loop_turn(
+            call_fn,
+            degrees=back_deg,
+            max_speed_deg_s=220.0,
+            tol_deg=1.4,
+            include_vision=True,
+            release_stop=False,
+            fast_settle=True,
+        )["after_status"]
+    else:
+        cur_st = call_fn("/status?vision=1", "GET", None)
+    return found_dyn is not None, cur_st, found_dyn, approaching_center
+
+
+def advance_segment(
+    call_fn: BridgeCall,
+    max_dist: float = 1.8,
+    speed_m_s: float = 0.55,
+    step_dt: float = 0.10,
+) -> dict:
+    """Tiến thẳng một đoạn hành lang/sân mở hoàn toàn vô trạng thái và dừng ngay khi gặp sự kiện."""
+    _require_finite(max_dist=max_dist, speed_m_s=speed_m_s, step_dt=step_dt)
+    max_wheel_linear = MAX_WHEEL_RAD_S * WHEEL_RADIUS
+    if max_dist <= 0.0:
+        raise ValueError("Tham số 'max_dist' phải lớn hơn 0.")
+    if speed_m_s < 0.05 or speed_m_s > max_wheel_linear:
+        raise ValueError(f"Tốc độ 'speed_m_s' phải nằm trong khoảng [0.05, {max_wheel_linear:.2f}] m/s.")
+    if step_dt < 0.04 or step_dt > 1.0:
+        raise ValueError("Chu kỳ điều khiển 'step_dt' phải nằm trong đoạn [0.04, 1.0] giây.")
+
+    watchdog_dur = round(max(0.32, step_dt * 3.0), 3)
+    st = call_fn("/status?vision=1", "GET", None)
+    rf0 = st["sensors"]["rangefinders_m"]
+    odom0 = float(st["sensors"].get("odom_dist_m", 0.0))
+    odom_m = odom0
+    has_hw_odom = "odom_dist_m" in st["sensors"]
+    prev_sim_t = float(st.get("sim_time", 0.0))
+    yaw0_deg = float(st["sensors"]["gyro_yaw_deg"])
+    l90_0 = float(rf0.get("left90", 3.0))
+    r90_0 = float(rf0.get("right90", 3.0))
+    in_narrow_0 = (l90_0 + r90_0) < 1.35 or l90_0 < 0.52 or r90_0 < 0.52
+    corridor_yaw_deg = yaw0_deg
+    if in_narrow_0:
+        nearest_90 = round(yaw0_deg / 90.0) * 90.0
+        if abs(_wrap_angle_deg(nearest_90 - yaw0_deg)) <= 15.0:
+            corridor_yaw_deg = nearest_90
+
+    def _sync_local_odom(cur_st: dict) -> float:
+        nonlocal odom_m, prev_sim_t
+        cur_sim = float(cur_st.get("sim_time", prev_sim_t))
+        dt_s = max(0.0, cur_sim - prev_sim_t)
+        prev_sim_t = cur_sim
+        sens = cur_st["sensors"]
+        if has_hw_odom:
+            odom_m = float(sens["odom_dist_m"])
+        else:
+            odom_m += abs(float(sens.get("forward_speed_m_s", 0.0))) * dt_s
+        return odom_m - odom0
+
+    def _finish_result(
+        event: str,
+        end_st: dict,
+        *,
+        obstacle: dict | None = None,
+        settle: bool = True,
+    ) -> dict:
+        if settle and (
+            end_st.get("moving", False)
+            or abs(float(end_st["sensors"].get("forward_speed_m_s", 0.0))) > 0.02
+            or abs(float(end_st["sensors"].get("yaw_rate_rad_s", 0.0))) > 0.04
+        ):
+            end_st = _stop_and_settle(call_fn, include_vision=True)
+        moved = round(max(0.0, _sync_local_odom(end_st)), 4)
+        rf_e = end_st["sensors"]["rangefinders_m"]
+        return {
+            "event": event,
+            "moved_m": moved,
+            "open_branches": compute_open_branches(rf_e),
+            "obstacle": obstacle,
+            "flank_clearance_m": {
+                "left": round(float(rf_e.get("left90", 3.0)), 3),
+                "right": round(float(rf_e.get("right90", 3.0)), 3),
+            },
+            "after_status": _clean_status(end_st),
+        }
+
+    # Chờ đầu nhánh rộng có piston nép hốc (<= 2.2s sim-time) chỉ khi thấy đích từ xa dọc hành lang hẹp
+    vis0 = st.get("vision", {})
+    if (
+        in_narrow_0
+        and vis0.get("target_visible")
+        and not vis0.get("obstacles")
+        and abs(float(vis0["target"]["offset_x"])) < 0.25
+        and float(rf0["center"]) > 1.05
+        and min(float(rf0["left"]), float(rf0["right"])) > 0.50
+        and min(l90_0, r90_0) >= 0.24
+        and (l90_0 + r90_0) >= 0.72
+    ):
+        t_p0 = float(st.get("sim_time", 0.0))
+        prev_p_sim = t_p0
+        stagnant = 0
+        p_deadline = time.monotonic() + 3.5
+        while time.monotonic() < p_deadline:
+            call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": watchdog_dur})
+            time.sleep(0.015)
+            st = call_fn("/status?vision=1", "GET", None)
+            _sync_local_odom(st)
+            if st.get("vision", {}).get("obstacles"):
+                break
+            cur_p_sim = float(st.get("sim_time", t_p0))
+            if (cur_p_sim - t_p0) >= 2.2:
+                break
+            if abs(cur_p_sim - prev_p_sim) < 1e-6:
+                stagnant += 1
+                if stagnant >= 4:
+                    break
+            else:
+                stagnant = 0
+            prev_p_sim = cur_p_sim
+
+    def _check_obstacle_event(cur_st: dict) -> dict | None:
+        motion, probe_st, obs_sum = _probe_front_obstacle_motion(call_fn, cur_st, z_limit=0.85)
+        if motion == "none" or obs_sum is None:
+            return None
+        p_rf = probe_st["sensors"]["rangefinders_m"]
+        min_f = min(float(p_rf["left"]), float(p_rf["center"]), float(p_rf["right"]))
+        if motion == "dynamic":
+            if min_f < 0.34 or obs_sum["est_dist_m"] < 0.26:
+                probe_st = closed_loop_move(
+                    call_fn,
+                    meters=-0.10,
+                    speed_m_s=0.25,
+                    safety_stop_m=0.0,
+                    include_vision=True,
+                    release_stop=True,
+                )["after_status"]
+            return _finish_result("dynamic_gate_ahead", probe_st, obstacle=obs_sum, settle=True)
+        # Vật cản tĩnh: chỉ báo khi nằm ngay trước đường tiến hoặc cận sườn mũi
+        if min_f < 0.70 or (obs_sum["est_dist_m"] <= 0.78 and abs(obs_sum["offset_x"]) < 0.72):
+            return _finish_result("static_obstacle_ahead", probe_st, obstacle=obs_sum, settle=True)
+        return None
+
+    # Kiểm tra trước khi xuất phát
+    obs_res = _check_obstacle_event(st)
+    if obs_res is not None:
+        return obs_res
+
+    # Trong không gian mở không có tường hai bên, liếc nhanh ±32° nếu chưa thấy vật cản cự ly gần (<= 0.90m) để tránh quẹt piston lệch góc
+    vis_cur = st.get("vision", {})
+    rf_init = st["sensors"]["rangefinders_m"]
+    has_near_front_obs = any(
+        _estimate_obs_cam_dist_m(o) <= 0.90 for o in vis_cur.get("obstacles", [])
+    )
+    if (
+        min(float(rf_init.get("left90", 3.0)), float(rf_init.get("right90", 3.0))) > 0.75
+        and float(rf_init["center"]) > 0.85
+        and not has_near_front_obs
+        and (
+            not vis_cur.get("target_visible")
+            or float(vis_cur["target"]["area_pct"]) < 2.2
+        )
+    ):
+        found_wing, st, wing_obs, _ = _glance_open_wings_for_dynamic_gate(call_fn, st, yaw0_deg)
+        _sync_local_odom(st)
+        if found_wing and wing_obs is not None:
+            return _finish_result("dynamic_gate_ahead", st, obstacle=wing_obs, settle=True)
+
+    if _is_target_ready_for_dock(st):
+        return _finish_result("target_ready", st, settle=True)
+
+    def _resolve_front_block(block_st: dict, *, do_settle: bool) -> dict:
+        settled = (
+            _stop_and_settle(call_fn, include_vision=True)
+            if (do_settle or block_st.get("moving", False))
+            else block_st
+        )
+        if _is_target_ready_for_dock(settled):
+            return _finish_result("target_ready", settled, settle=False)
+        obs_after = _check_obstacle_event(settled)
+        if obs_after is not None:
+            return obs_after
+        rf_s = settled["sensors"]["rangefinders_m"]
+        if float(rf_s["center"]) < 0.26 or min(float(rf_s["left"]), float(rf_s["right"])) < 0.21:
+            settled = closed_loop_move(
+                call_fn,
+                meters=-0.08,
+                speed_m_s=0.24,
+                safety_stop_m=0.0,
+                include_vision=True,
+                release_stop=True,
+            )["after_status"]
+            rf_s = settled["sensors"]["rangefinders_m"]
+        if (
+            float(rf_s.get("left90", 3.0)) <= 0.52
+            and float(rf_s.get("right90", 3.0)) <= 0.52
+            and (
+                ("left120" in rf_s and float(rf_s["left120"]) > 0.72)
+                or ("right120" in rf_s and float(rf_s["right120"]) > 0.72)
+            )
+        ):
+            # Chờ ngắn tới 1.2s sim-time nếu left120/right120 mở (piston có thể đang che góc ±90° tại ngã rẽ)
+            t_c0 = float(settled.get("sim_time", 0.0))
+            prev_c_sim = t_c0
+            stagnant_c = 0
+            for _ in range(30):
+                if (float(settled.get("sim_time", t_c0)) - t_c0) >= 1.2:
+                    break
+                call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.25})
+                time.sleep(0.012)
+                settled = call_fn("/status?vision=1", "GET", None)
+                rf_s = settled["sensors"]["rangefinders_m"]
+                if float(rf_s.get("left90", 3.0)) > 0.55 or float(rf_s.get("right90", 3.0)) > 0.55:
+                    break
+                cur_c_sim = float(settled.get("sim_time", t_c0))
+                if abs(cur_c_sim - prev_c_sim) < 1e-6:
+                    stagnant_c += 1
+                    if stagnant_c >= 2:
+                        break
+                else:
+                    stagnant_c = 0
+                prev_c_sim = cur_c_sim
+        ev_block = (
+            "junction"
+            if (float(rf_s.get("left90", 3.0)) > 0.52 or float(rf_s.get("right90", 3.0)) > 0.52)
+            else "dead_end"
+        )
+        return _finish_result(ev_block, settled, settle=False)
+
+    rf_now = st["sensors"]["rangefinders_m"]
+    rf_c = float(rf_now["center"])
+    rf_l = float(rf_now["left"])
+    rf_r = float(rf_now["right"])
+    if rf_c < 0.40 or min(rf_l, rf_r) < 0.28:
+        return _resolve_front_block(st, do_settle=False)
+
+    saw_left_wall = l90_0 < 0.65
+    saw_right_wall = r90_0 < 0.65
+    left_edge_odom = odom0 + 0.10 if saw_left_wall else odom0
+    right_edge_odom = odom0 + 0.10 if saw_right_wall else odom0
+    left_open_streak = 0
+    right_open_streak = 0
+    branch_center_odom_m: float | None = None
+
+    sim_per_wall = 1.0
+    has_rate_est = False
+    prev_iter_wall: float | None = None
+    prev_iter_sim: float | None = None
+    stopped_cleanly = False
+    max_iters = max(40, int(max_dist / max(0.05, speed_m_s * step_dt) * 4) + 30)
+
+    try:
+        for step_idx in range(1, max_iters + 1):
+            t_iter_wall = time.perf_counter()
+            if step_idx > 1:
+                st = call_fn("/status?vision=1", "GET", None)
+            moved = _sync_local_odom(st)
+            cur_sim_t = float(st.get("sim_time", 0.0))
+            if prev_iter_wall is not None and prev_iter_sim is not None:
+                dt_w = t_iter_wall - prev_iter_wall
+                dt_s = cur_sim_t - prev_iter_sim
+                if dt_w > 1e-3 and dt_s > 1e-4:
+                    inst_rate = max(0.8, min(10.0, dt_s / dt_w))
+                    sim_per_wall = inst_rate if not has_rate_est else (0.5 * sim_per_wall + 0.5 * inst_rate)
+                    has_rate_est = True
+            prev_iter_wall = t_iter_wall
+            prev_iter_sim = cur_sim_t
+
+            rf = st["sensors"]["rangefinders_m"]
+            rf_l = float(rf["left"])
+            rf_c = float(rf["center"])
+            rf_r = float(rf["right"])
+            rf_l90 = float(rf.get("left90", 3.0))
+            rf_r90 = float(rf.get("right90", 3.0))
+            rf_l120 = float(rf.get("left120", 3.0))
+            rf_r120 = float(rf.get("right120", 3.0))
+            has_120 = ("left120" in rf) and ("right120" in rf)
+            in_narrow_now = (rf_l90 + rf_r90) < 1.35 or rf_l90 < 0.52 or rf_r90 < 0.52
+
+            # Kiểm tra vật cản & target_ready trước
+            obs_res = _check_obstacle_event(st)
+            if obs_res is not None:
+                stopped_cleanly = True
+                return obs_res
+
+            if _is_target_ready_for_dock(st):
+                stopped_cleanly = True
+                return _finish_result("target_ready", st, settle=True)
+
+            # Kiểm tra tường phía trước -> dừng và trả về junction hoặc dead_end
+            if rf_c < 0.40 or min(rf_l, rf_r) < 0.28:
+                stopped_cleanly = True
+                return _resolve_front_block(st, do_settle=True)
+
+            # Cập nhật lịch sử tường hông trong phạm vi lần gọi này (vô trạng thái giữa các lần gọi)
+            if moved >= 0.08:
+                if rf_l90 < 0.65:
+                    saw_left_wall = True
+                    left_edge_odom = max(left_edge_odom, odom_m + 0.08)
+                if has_120 and rf_l120 < 0.72:
+                    saw_left_wall = True
+                    left_edge_odom = max(left_edge_odom, odom_m + 0.05 - 0.5 * rf_l120)
+                if rf_r90 < 0.65:
+                    saw_right_wall = True
+                    right_edge_odom = max(right_edge_odom, odom_m + 0.08)
+                if has_120 and rf_r120 < 0.72:
+                    saw_right_wall = True
+                    right_edge_odom = max(right_edge_odom, odom_m + 0.05 - 0.5 * rf_r120)
+
+            l_open_now = (rf_l90 > 0.75 and rf_l120 > 0.72) if has_120 else (rf_l90 > 0.72)
+            r_open_now = (rf_r90 > 0.75 and rf_r120 > 0.72) if has_120 else (rf_r90 > 0.72)
+            if branch_center_odom_m is None and moved >= 0.22:
+                if saw_left_wall and l_open_now:
+                    left_open_streak += 1
+                    if left_open_streak >= (1 if has_120 else 1):
+                        rem_l = max(0.12, min(0.30, (left_edge_odom + 0.34) - odom_m)) if has_120 else 0.28
+                        branch_center_odom_m = odom_m + rem_l
+                elif not l_open_now:
+                    left_open_streak = 0
+
+                if branch_center_odom_m is None and saw_right_wall and r_open_now:
+                    right_open_streak += 1
+                    if right_open_streak >= (1 if has_120 else 1):
+                        rem_r = max(0.12, min(0.30, (right_edge_odom + 0.34) - odom_m)) if has_120 else 0.28
+                        branch_center_odom_m = odom_m + rem_r
+                elif not r_open_now:
+                    right_open_streak = 0
+
+            if branch_center_odom_m is not None and (odom_m >= branch_center_odom_m - 0.02 or rf_c <= 0.36):
+                settled = _stop_and_settle(call_fn, include_vision=True)
+                branches = compute_open_branches(settled["sensors"]["rangefinders_m"])
+                if _is_target_ready_for_dock(settled):
+                    stopped_cleanly = True
+                    return _finish_result("target_ready", settled, settle=False)
+                if "left" in branches or "right" in branches:
+                    stopped_cleanly = True
+                    return _finish_result("junction", settled, settle=False)
+                branch_center_odom_m = None
+
+            if moved >= max_dist - 0.015:
+                stopped_cleanly = True
+                return _finish_result("max_dist", st, settle=True)
+
+            cur_yaw_deg = float(st["sensors"]["gyro_yaw_deg"])
+            yaw_rate_deg_s = math.degrees(float(st["sensors"].get("yaw_rate_rad_s", 0.0)))
+            yaw_bias = _corridor_heading_bias(rf, in_narrow_now) if in_narrow_now else 0.0
+            yaw_err = _wrap_angle_deg((corridor_yaw_deg + yaw_bias) - cur_yaw_deg)
+            trim = max(-3.2, min(3.2, 0.26 * yaw_err - 0.022 * yaw_rate_deg_s))
+
+            front_clear = min(rf_c, rf_l + 0.22, rf_r + 0.22)
+            cruise = speed_m_s if front_clear > 0.78 else max(0.22, speed_m_s * ((front_clear - 0.32) / 0.46))
+            rem_limit = max_dist - moved
+            if branch_center_odom_m is not None:
+                rem_limit = min(rem_limit, max(0.02, branch_center_odom_m - odom_m))
+            if rem_limit < 0.24:
+                cruise = min(cruise, max(0.18, 1.8 * rem_limit))
+            if min(rf_l90, rf_r90) < 0.24:
+                cruise = min(cruise, 0.36)
+
+            cmd_dur = round(max(0.05, min(watchdog_dur, rem_limit / max(0.18, cruise) + 0.02)), 3)
+            base_w = min(cruise / WHEEL_RADIUS, MAX_WHEEL_RAD_S)
+            lw = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, base_w - trim))
+            rw = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, base_w + trim))
+            call_fn("/wheels", "POST", {"left": round(lw, 4), "right": round(rw, 4), "duration": cmd_dur})
+
+            target_wall_dt = min(0.045, step_dt * 1.25) if not has_rate_est else (step_dt * 1.25) / sim_per_wall
+            time.sleep(max(0.002, target_wall_dt - (time.perf_counter() - t_iter_wall)))
+
+        settled = _stop_and_settle(call_fn, include_vision=True)
+        stopped_cleanly = True
+        return _finish_result("max_dist", settled, settle=False)
+    finally:
+        if not stopped_cleanly:
+            call_fn("/stop", "POST", {})
+
+
+def cross_dynamic_gate(call_fn: BridgeCall, timeout_s: float = 12.0) -> dict:
+    """Chờ đúng 1 làn/cổng tuần tra động rút hẳn khỏi tâm đường rồi băng qua dứt điểm 1 nhịp."""
+    _require_finite(timeout_s=timeout_s)
+    if timeout_s <= 0.0:
+        raise ValueError("Tham số 'timeout_s' phải lớn hơn 0.")
+
+    st = call_fn("/status?vision=1", "GET", None)
+    odom0 = float(st["sensors"].get("odom_dist_m", 0.0))
+    odom_m = odom0
+    has_hw_odom = "odom_dist_m" in st["sensors"]
+    prev_sim_t = float(st.get("sim_time", 0.0))
+    yaw0_deg = float(st["sensors"]["gyro_yaw_deg"])
+    rf0 = st["sensors"]["rangefinders_m"]
+    l90_0 = float(rf0.get("left90", 3.0))
+    r90_0 = float(rf0.get("right90", 3.0))
+    if (l90_0 + r90_0) < 1.35 or l90_0 < 0.52 or r90_0 < 0.52:
+        nearest_90 = round(yaw0_deg / 90.0) * 90.0
+        if abs(_wrap_angle_deg(nearest_90 - yaw0_deg)) <= 15.0:
+            yaw0_deg = nearest_90
+
+    def _sync_local_odom(cur_st: dict) -> float:
+        nonlocal odom_m, prev_sim_t
+        cur_sim = float(cur_st.get("sim_time", prev_sim_t))
+        dt_s = max(0.0, cur_sim - prev_sim_t)
+        prev_sim_t = cur_sim
+        sens = cur_st["sensors"]
+        if has_hw_odom:
+            odom_m = float(sens["odom_dist_m"])
+        else:
+            odom_m += abs(float(sens.get("forward_speed_m_s", 0.0))) * dt_s
+        return odom_m - odom0
+
+    def _result(crossed: bool, reason: str, end_st: dict) -> dict:
+        rf_e = end_st["sensors"]["rangefinders_m"]
+        return {
+            "crossed": crossed,
+            "reason": reason,
+            "moved_m": round(max(0.0, _sync_local_odom(end_st)), 4),
+            "open_branches": compute_open_branches(rf_e),
+            "after_status": _clean_status(end_st),
+        }
+
+    # Trong không gian mở chưa thấy vật cản cự ly gần (<= 0.90m), liếc ±32° để ghi nhận pha piston biên
+    wing_approaching = False
+    has_near_gate_obs = any(
+        _estimate_obs_cam_dist_m(o) <= 0.90 for o in st.get("vision", {}).get("obstacles", [])
+    )
+    if min(l90_0, r90_0) > 0.75 and not has_near_gate_obs:
+        _, st, _, wing_approaching = _glance_open_wings_for_dynamic_gate(call_fn, st, yaw0_deg)
+        _sync_local_odom(st)
+
+    nearest_gate_z = 0.50
+    if st.get("vision", {}).get("obstacles"):
+        motion, st, obs_sum = _probe_front_obstacle_motion(call_fn, st, z_limit=0.95)
+        _sync_local_odom(st)
+        rf_p = st["sensors"]["rangefinders_m"]
+        min_f = min(float(rf_p["left"]), float(rf_p["center"]), float(rf_p["right"]))
+        if motion == "static" and (min_f < 0.72 or (obs_sum is not None and obs_sum["est_dist_m"] <= 0.85)):
+            if st.get("moving", False):
+                st = _stop_and_settle(call_fn, include_vision=True)
+            return _result(False, "static_obstacle", st)
+        if obs_sum is not None and obs_sum["est_dist_m"] <= 0.90:
+            nearest_gate_z = max(0.32, obs_sum["est_dist_m"])
+
+    rf_now = st["sensors"]["rangefinders_m"]
+    cur_obs = st.get("vision", {}).get("obstacles", [])
+    if min(float(rf_now["left"]), float(rf_now["center"]), float(rf_now["right"])) < 0.34 or any(
+        _estimate_obs_cam_dist_m(o) < 0.26 for o in cur_obs
+    ):
+        st = closed_loop_move(
+            call_fn,
+            meters=-0.10,
+            speed_m_s=0.25,
+            safety_stop_m=0.0,
+            include_vision=True,
+            release_stop=False,
+        )["after_status"]
+        _sync_local_odom(st)
+
+    # Nếu cánh ngoài đang lao vào tâm mà camera thẳng chưa thấy vật cản, chờ tối đa 3.0s sim-time cho nó quét qua
+    if wing_approaching and not any(
+        _estimate_obs_cam_dist_m(o) <= 0.90 for o in st.get("vision", {}).get("obstacles", [])
+    ):
+        t_app0 = float(st.get("sim_time", 0.0))
+        app_wait_s = min(3.0, timeout_s)
+        prev_app_sim = t_app0
+        for _ in range(45):
+            if (float(st.get("sim_time", t_app0)) - t_app0) >= app_wait_s:
+                break
+            call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.25})
+            time.sleep(0.015)
+            st = call_fn("/status?vision=1", "GET", None)
+            _sync_local_odom(st)
+            w_rf_a = st["sensors"]["rangefinders_m"]
+            if (
+                any(_estimate_obs_cam_dist_m(o) <= 0.90 for o in st.get("vision", {}).get("obstacles", []))
+                or min(float(w_rf_a["left"]), float(w_rf_a["center"]), float(w_rf_a["right"])) < 0.78
+            ):
+                break
+            cur_app_sim = float(st.get("sim_time", t_app0))
+            if abs(cur_app_sim - prev_app_sim) < 1e-6:
+                break
+            prev_app_sim = cur_app_sim
+
+    # Chờ khe hở 2 nhịp liên tiếp theo hướng rút lui
+    wait_start_sim = float(st.get("sim_time", 0.0))
+    wait_deadline = time.monotonic() + max(18.0, timeout_s * 2.5)
+    clear_streak = 0
+    last_clear_sim_t = -999.0
+    prev_obs = _obs_signature(st.get("vision", {}))
+    wait_st = st
+    gate_opened = False
+
+    while time.monotonic() < wait_deadline and (float(wait_st.get("sim_time", wait_start_sim)) - wait_start_sim) < timeout_s:
+        call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.30})
+        time.sleep(0.015)
+        wait_st = call_fn("/status?vision=1", "GET", None)
+        _sync_local_odom(wait_st)
+        w_rf = wait_st["sensors"]["rangefinders_m"]
+        w_obs = wait_st.get("vision", {}).get("obstacles", [])
+        cur_map = _obs_signature(wait_st.get("vision", {}))
+        obs_blocking = False
+        for o in w_obs:
+            z_o = _estimate_obs_cam_dist_m(o)
+            if z_o <= 0.78:
+                nearest_gate_z = min(nearest_gate_z, max(0.30, z_o))
+                cn = str(o.get("color", ""))
+                ox_w = float(o["offset_x"])
+                if abs(ox_w) < 0.78:
+                    obs_blocking = True
+                    break
+                if cn in prev_obs:
+                    d_ox = ox_w - prev_obs[cn]
+                    if (ox_w * d_ox) <= 0.004:
+                        obs_blocking = True
+                        break
+                else:
+                    obs_blocking = True
+                    break
+        prev_obs = cur_map
+        center_ok = (float(w_rf["center"]) > 0.78) or (
+            not w_obs and not wing_approaching and float(w_rf["center"]) > 0.45
+        )
+        gate_clear = (
+            center_ok
+            and min(float(w_rf["left"]), float(w_rf["right"])) > 0.38
+            and not obs_blocking
+        )
+        cur_w_sim = float(wait_st.get("sim_time", wait_start_sim))
+        if gate_clear:
+            if clear_streak == 0 or (cur_w_sim - last_clear_sim_t) >= 0.08:
+                clear_streak += 1
+                last_clear_sim_t = cur_w_sim
+            if clear_streak >= 2:
+                gate_opened = True
+                break
+        else:
+            clear_streak = 0
+
+    if not gate_opened:
+        settled = _stop_and_settle(call_fn, include_vision=True)
+        return _result(False, "timeout", settled)
+
+    # Băng qua dứt điểm tối đa 1 cổng
+    cross_start_odom = _sync_local_odom(wait_st)
+    commit_dist = min(1.05, max(0.72, nearest_gate_z + 0.48))
+    cur_st = wait_st
+    stop_reason = "cleared"
+    sim_per_wall = 1.0
+    has_rate_est = False
+    prev_iter_wall: float | None = None
+    prev_iter_sim: float | None = None
+    stopped_cleanly = False
+
+    try:
+        for step_idx in range(1, 140):
+            t_iter_wall = time.perf_counter()
+            if step_idx > 1:
+                cur_st = call_fn("/status?vision=1", "GET", None)
+            moved_total = _sync_local_odom(cur_st)
+            moved_cross = moved_total - cross_start_odom
+            cur_sim_t = float(cur_st.get("sim_time", 0.0))
+            if prev_iter_wall is not None and prev_iter_sim is not None:
+                dt_w = t_iter_wall - prev_iter_wall
+                dt_s = cur_sim_t - prev_iter_sim
+                if dt_w > 1e-3 and dt_s > 1e-4:
+                    inst_rate = max(0.8, min(10.0, dt_s / dt_w))
+                    sim_per_wall = inst_rate if not has_rate_est else (0.5 * sim_per_wall + 0.5 * inst_rate)
+                    has_rate_est = True
+            prev_iter_wall = t_iter_wall
+            prev_iter_sim = cur_sim_t
+
+            rf_c_dict = cur_st["sensors"]["rangefinders_m"]
+            rf_c = float(rf_c_dict["center"])
+            rf_l = float(rf_c_dict["left"])
+            rf_r = float(rf_c_dict["right"])
+            rf_l90 = float(rf_c_dict.get("left90", 3.0))
+            rf_r90 = float(rf_c_dict.get("right90", 3.0))
+            in_narrow = (rf_l90 + rf_r90) < 1.35 or rf_l90 < 0.52 or rf_r90 < 0.52
+            c_obs = cur_st.get("vision", {}).get("obstacles", [])
+
+            if rf_c <= 0.34 or min(rf_l, rf_r) <= 0.26:
+                stop_reason = "wall_ahead"
+                break
+            if moved_cross >= nearest_gate_z + 0.36 and (
+                any(_estimate_obs_cam_dist_m(o) <= 0.56 and abs(float(o["offset_x"])) < 0.90 for o in c_obs)
+                or min(rf_l, rf_c, rf_r) < 0.44
+            ):
+                stop_reason = "next_obstacle_ahead"
+                break
+            if moved_cross >= commit_dist - 0.015:
+                stop_reason = "cleared"
+                break
+
+            cur_yaw = float(cur_st["sensors"]["gyro_yaw_deg"])
+            yaw_rate = math.degrees(float(cur_st["sensors"].get("yaw_rate_rad_s", 0.0)))
+            yaw_bias = _corridor_heading_bias(rf_c_dict, in_narrow) if in_narrow else 0.0
+            yaw_err = _wrap_angle_deg((yaw0_deg + yaw_bias) - cur_yaw)
+            trim = max(-3.2, min(3.2, 0.26 * yaw_err - 0.022 * yaw_rate))
+
+            rem = max(0.02, commit_dist - moved_cross)
+            spd = 0.58 if rem > 0.20 else max(0.22, 2.0 * rem)
+            base_w = min(spd / WHEEL_RADIUS, MAX_WHEEL_RAD_S)
+            lw = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, base_w - trim))
+            rw = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, base_w + trim))
+            call_fn("/wheels", "POST", {"left": round(lw, 4), "right": round(rw, 4), "duration": 0.30})
+
+            target_wall_dt = 0.045 if not has_rate_est else 0.12 / sim_per_wall
+            time.sleep(max(0.002, target_wall_dt - (time.perf_counter() - t_iter_wall)))
+
+        settled = _stop_and_settle(call_fn, include_vision=True)
+        settled = _apply_asymmetric_shaft_tuck(call_fn, settled, re_center_target=False)
+        stopped_cleanly = True
+        return _result(True, stop_reason, settled)
+    finally:
+        if not stopped_cleanly:
+            call_fn("/stop", "POST", {})
+
+
+def dock_target(
+    call_fn: BridgeCall,
+    stop_distance: float = 0.25,
+    max_steps: int = 80,
+    step_dt: float = 0.12,
+) -> dict:
+    """Tiếp cận và căn thẳng tâm mục tiêu ở cự ly gần khi không còn vật cản chắn trước mặt."""
+    _require_finite(stop_distance=stop_distance, step_dt=step_dt)
+    if stop_distance < 0.12 or stop_distance > 1.5:
+        raise ValueError("Khoảng cách dừng 'stop_distance' phải nằm trong đoạn [0.12, 1.5] mét.")
+    if int(max_steps) < 1:
+        raise ValueError("Số nhịp 'max_steps' phải lớn hơn hoặc bằng 1.")
+    if step_dt < 0.04 or step_dt > 1.0:
+        raise ValueError("Chu kỳ điều khiển 'step_dt' phải nằm trong đoạn [0.04, 1.0] giây.")
+
+    watchdog_dur = round(max(0.35, step_dt * 3.0), 3)
+    st = call_fn("/status?vision=1", "GET", None)
+
+    def _refusal(cur_st: dict) -> str | None:
+        vis = cur_st.get("vision", {})
+        rf = cur_st["sensors"]["rangefinders_m"]
+        rf_c = float(rf["center"])
+        min_f = min(float(rf["left"]), rf_c, float(rf["right"]))
+        if not vis.get("target_visible") or not isinstance(vis.get("target"), dict):
+            return "not_visible"
+        t_obj = vis["target"]
+        t_off = float(t_obj["offset_x"])
+        t_area = float(t_obj["area_pct"])
+        obs = vis.get("obstacles", [])
+        closer_obs = any(
+            float(o["area_pct"]) > max(1.0, t_area * 1.2) and abs(float(o["offset_x"])) < 0.35
+            for o in obs
+        )
+        close_to_target = (
+            abs(t_off) < 0.35 and (rf_c <= stop_distance + 0.35 or t_area >= 4.0)
+        ) or (not obs and t_area >= 3.5)
+        if closer_obs or (min_f < 0.38 and not close_to_target):
+            return "obstacle_blocking"
+        if (rf_c > 1.85 and t_area < 0.45) or (rf_c > 1.65 and t_area < 0.35):
+            return "too_far"
+        return None
+
+    init_err = _refusal(st)
+    if init_err is not None:
+        return {
+            "reached": False,
+            "reason": init_err,
+            "steps": 0,
+            "after_status": _clean_status(st),
+        }
+
+    sim_per_wall = 1.0
+    has_rate_est = False
+    prev_iter_wall: float | None = None
+    prev_iter_sim: float | None = None
+    stopped_cleanly = False
+    steps_taken = 0
+    lost_streak = 0
+    last_offset_x = float(st["vision"]["target"]["offset_x"])
+
+    try:
+        for step_idx in range(1, int(max_steps) + 1):
+            steps_taken = step_idx
+            t_iter_wall = time.perf_counter()
+            if step_idx > 1:
+                st = call_fn("/status?vision=1", "GET", None)
+            cur_sim_t = float(st.get("sim_time", 0.0))
+            if prev_iter_wall is not None and prev_iter_sim is not None:
+                dt_w = t_iter_wall - prev_iter_wall
+                dt_s = cur_sim_t - prev_iter_sim
+                if dt_w > 1e-3 and dt_s > 1e-4:
+                    inst_rate = max(0.8, min(10.0, dt_s / dt_w))
+                    sim_per_wall = inst_rate if not has_rate_est else (0.5 * sim_per_wall + 0.5 * inst_rate)
+                    has_rate_est = True
+            prev_iter_wall = t_iter_wall
+            prev_iter_sim = cur_sim_t
+
+            vis = st.get("vision", {})
+            rf = st["sensors"]["rangefinders_m"]
+            rf_c = float(rf["center"])
+            rf_l = float(rf["left"])
+            rf_r = float(rf["right"])
+            min_f = min(rf_l, rf_c, rf_r)
+
+            seen = bool(vis.get("target_visible")) and isinstance(vis.get("target"), dict)
+            if seen:
+                lost_streak = 0
+                offset_x = float(vis["target"]["offset_x"])
+                area_pct = float(vis["target"]["area_pct"])
+                last_offset_x = offset_x
+                obs = vis.get("obstacles", [])
+                closer_obs = any(
+                    float(o["area_pct"]) > max(1.0, area_pct * 1.2) and abs(float(o["offset_x"])) < 0.35
+                    for o in obs
+                )
+                if closer_obs or (min_f < 0.34 and rf_c > stop_distance + 0.14 and area_pct < 3.5):
+                    settled = _stop_and_settle(call_fn, include_vision=True)
+                    stopped_cleanly = True
+                    return {
+                        "reached": False,
+                        "reason": "obstacle_blocking",
+                        "steps": steps_taken,
+                        "after_status": _clean_status(settled),
+                    }
+            else:
+                lost_streak += 1
+                if lost_streak > 4:
+                    settled = _stop_and_settle(call_fn, include_vision=True)
+                    stopped_cleanly = True
+                    return {
+                        "reached": False,
+                        "reason": "not_visible",
+                        "steps": steps_taken,
+                        "after_status": _clean_status(settled),
+                    }
+                w_spin = 2.8 if last_offset_x >= 0.0 else -2.8
+                call_fn("/wheels", "POST", {"left": w_spin, "right": -w_spin, "duration": watchdog_dur})
+                target_wall_dt = min(0.04, step_dt) if not has_rate_est else step_dt / sim_per_wall
+                time.sleep(max(0.002, target_wall_dt - (time.perf_counter() - t_iter_wall)))
+                continue
+
+            if rf_c <= stop_distance + 0.04 and (area_pct >= 3.0 or rf_c <= stop_distance + 0.03):
+                settled = _stop_and_settle(call_fn, include_vision=True)
+                vis_s = settled.get("vision", {})
+                if vis_s.get("target_visible") and abs(float(vis_s["target"]["offset_x"])) >= 0.14:
+                    corr_deg = -math.degrees(math.atan(float(vis_s["target"]["offset_x"]) * FRONT_CAM_TAN_HALF_FOVX))
+                    if abs(corr_deg) >= 0.8:
+                        settled = closed_loop_turn(
+                            call_fn,
+                            degrees=corr_deg,
+                            max_speed_deg_s=65.0,
+                            tol_deg=0.6,
+                            include_vision=True,
+                            release_stop=True,
+                        )["after_status"]
+                        vis_s = settled.get("vision", {})
+                rf_s = float(settled["sensors"]["rangefinders_m"]["center"])
+                if (
+                    vis_s.get("target_visible")
+                    and abs(float(vis_s["target"]["offset_x"])) < 0.22
+                    and 0.15 <= rf_s <= max(0.35, stop_distance + 0.08)
+                ):
+                    stopped_cleanly = True
+                    return {
+                        "reached": True,
+                        "reason": "reached_target",
+                        "steps": steps_taken,
+                        "after_status": _clean_status(settled),
+                    }
+
+            if abs(offset_x) > 0.36:
+                spin_w = max(-3.6, min(3.6, 4.2 * offset_x))
+                lw, rw = spin_w, -spin_w
+            else:
+                ramp = max(0.0, min(1.0, (rf_c - stop_distance) / 0.55))
+                spd = 0.08 + 0.34 * ramp if rf_c > stop_distance + 0.01 else 0.0
+                base_w = spd / WHEEL_RADIUS
+                steer = max(-3.8, min(3.8, 3.6 * offset_x))
+                lw = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, base_w + steer))
+                rw = max(-MAX_WHEEL_RAD_S, min(MAX_WHEEL_RAD_S, base_w - steer))
+
+            call_fn("/wheels", "POST", {"left": round(lw, 4), "right": round(rw, 4), "duration": watchdog_dur})
+            target_wall_dt = min(0.04, step_dt) if not has_rate_est else step_dt / sim_per_wall
+            time.sleep(max(0.002, target_wall_dt - (time.perf_counter() - t_iter_wall)))
+
+        settled = _stop_and_settle(call_fn, include_vision=True)
+        stopped_cleanly = True
+        vis_f = settled.get("vision", {})
+        rf_f = float(settled["sensors"]["rangefinders_m"]["center"])
+        ok = (
+            bool(vis_f.get("target_visible"))
+            and abs(float(vis_f["target"]["offset_x"])) < 0.22
+            and 0.15 <= rf_f <= max(0.35, stop_distance + 0.08)
+        )
+        return {
+            "reached": ok,
+            "reason": "reached_target" if ok else "max_steps",
+            "steps": steps_taken,
+            "after_status": _clean_status(settled),
+        }
+    finally:
+        if not stopped_cleanly:
+            call_fn("/stop", "POST", {})
