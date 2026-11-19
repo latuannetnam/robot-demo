@@ -8,12 +8,19 @@ description: >-
 
 # Multi-Agent Robot Control & Auto-R&D (`robot-multi-agent-rd`)
 
-Keep **Main Agent** context ultra-lean (~1–2 KB scorecard per round) while delegating verbose driving loops to `robot-driver` and physics/code forensics to `robot-engineer`.
+Keep **Main Agent** context ultra-lean (~1–2 KB scorecard per round) while delegating verbose driving loops to a blind driver subagent and physics/code forensics to `robot-engineer`.
+
+## Execution Modes
+
+This skill supports two operating modes:
+- **Mode A — `auto-skill` (Default):** Unless the user explicitly requests `agent-brain` / cognitive control, run **Mode A** using closed-loop autonomous navigation skills (`explore`, `approach`, `scan`) inside `robot-driver`.
+- **Mode B — `agent-brain` (Cognitive Experiment):** Activated when the user asks for `agent-brain` / Mode B / Agent-as-the-brain navigation. Uses `robot-driver-brain` with stateless 20 Hz reflex primitives (`advance`, `cross-gate`, `dock`, `turn`, `move`, `scan --no-recover-occlusion`) while the AI subagent handles 100% of topological graph memory and path planning. Wall-clock `wall_time_s` is **not** a pass/fail gate in Mode B.
 
 ## 1. Register Specialized Subagents Once Per Session
 
-Before Round 1, read the two reference templates and register both subagent types via `define_subagent`:
-- **`robot-driver`** (`EnableWriteTools: true`, `EnableSubagentTools: false`): System prompt from [driver-prompt.md](./references/driver-prompt.md).
+Before Round 1, read the reference templates and register the needed subagent types via `define_subagent`:
+- **`robot-driver`** (`EnableWriteTools: true`, `EnableSubagentTools: false`, Mode A default): System prompt from [driver-prompt.md](./references/driver-prompt.md).
+- **`robot-driver-brain`** (`EnableWriteTools: true`, `EnableSubagentTools: false`, Mode B): System prompt from [driver-brain-prompt.md](./references/driver-brain-prompt.md).
 - **`robot-engineer`** (`EnableWriteTools: true`, `EnableSubagentTools: false`): System prompt from [engineer-prompt.md](./references/engineer-prompt.md).
 
 ## 2. R&D Loop Protocol (Maximum 3 Rounds)
@@ -31,32 +38,33 @@ For Round `i = 1..3`:
    *(Main Agent may inspect available maps and active arena via `.venv\Scripts\python.exe robot_ctl.py arenas --debug`. If `status` fails with `BridgeOfflineError` or `/arenas` is missing on an older server process, ask the user to restart `uv run python sim_server.py` once in their PowerShell window.)*
 
 2. **Launch Zero-Token Background Blackbox (`WaitMsBeforeAsync: 500`):**
-   Use `--max-duration 360` so multi-corridor maze exploration never hits premature blackbox timeout:
+   Use `--max-duration 360` in Mode A (`auto-skill`) or `--max-duration 900` in Mode B (`agent-brain`, since `wall_time_s` is unconstrained during LLM reasoning):
    ```powershell
+   # Mode A (default auto-skill):
    .venv\Scripts\python.exe robot_ctl.py telemetry record --hz 10 --max-duration 360
+   # Mode B (agent-brain):
+   .venv\Scripts\python.exe robot_ctl.py telemetry record --hz 10 --max-duration 900
    ```
 
-3. **Dispatch `robot-driver` Subagent (`invoke_subagent`):**
-   - Pass `TypeName: "robot-driver"`, `Model: "inherit"` (or `"flash"` when user explicitly requests fast/light model).
+3. **Dispatch Driver Subagent (`invoke_subagent`):**
+   - Pass `TypeName: "robot-driver"` (Mode A) or `TypeName: "robot-driver-brain"` (Mode B), `Model: "inherit"` (or `"flash"` when requested).
    - Brief: state ONLY the mission goal (`vision.target_visible == true`, `|offset_x| < 0.25`, `0.15 <= rf_center <= 0.35`, zero collisions) — NEVER reveal `<X>, <Y>` coordinates, spawn pose, or which arena (`2wheel` / `maze_a` / `maze_b` / `maze_c` / `dynamic_a` / `dynamic_b`) is loaded!
    - End turn and wait for reactive wakeup (do **not** poll).
 
 4. **Collect Compact 1 KB Scorecard:**
-   Once `robot-driver` replies, stop the blackbox and read the summary JSON:
+   Once the driver subagent replies, stop the blackbox and read the summary JSON:
    ```powershell
    .venv\Scripts\python.exe robot_ctl.py telemetry stop
    ```
-   Do **not** read `robot-driver`'s full `transcript.jsonl` into Main Agent context unless debugging a tool crash.
+   Do **not** read the driver's full `transcript.jsonl` into Main Agent context unless debugging a tool crash.
 
 5. **Grade & Decide:**
-   - **Pass & Optimal Criteria:**
-     - `goal_reached == true`
-     - `contact_count == 0` (zero physical collisions with walls or static/moving obstacles), `near_collision_count == 0`, and `error_count == 0`
-     - `wall_time_s <= 90.0` on open static arena (`2wheel`), `wall_time_s <= 120.0` on dynamic crosswalk arena (`dynamic_a`), or `wall_time_s <= 180.0` (`<= 180s`) on multi-corridor mazes (`maze_a`, `maze_b`, `maze_c`, `dynamic_b`)
-     - `anomalies.braking_rf_drop_m < 0.15`
-   - If **Pass & Optimal** (or `i == 3`), stop the loop and present the round-by-round scorecard table to the user.
-   - Otherwise, record current `git rev-parse HEAD` (or diff checkpoint) and dispatch **`robot-engineer`** (`invoke_subagent` with `TypeName: "robot-engineer"`), passing:
-     - The `telemetry stop` JSON scorecard,
-     - `robot-driver`'s short summary,
-     - Specific bottleneck to fix (e.g., side/diagonal rangefinder coverage in `models/robot_2wheel.xml`, corridor wall-following, dead-end recovery, junction exploration, or actuator tuning).
-   - **Regression Guard:** After Round `i + 1` runs, if `pytest` broke or Round `i + 1` regressed severely (e.g., failed `goal_reached` or introduced collisions compared to Round `i`), revert unverified edits via `git checkout -- models/robot_2wheel.xml robot_sim robot_ctl.py` and run `.venv\Scripts\python.exe robot_ctl.py reload`.
+   - **Mode A (`auto-skill`) Pass & Optimal Criteria:**
+     - `goal_reached == true`, `contact_count == 0`, `near_collision_count == 0`, `error_count == 0`, `anomalies.braking_rf_drop_m < 0.15`
+     - `wall_time_s <= 90.0` (`2wheel`), `<= 120.0` (`dynamic_a`), or `<= 180.0` (`maze_a`, `maze_b`, `maze_c`, `dynamic_b`)
+   - **Mode B (`agent-brain`) Pass & Cognitive Quality Criteria:**
+     - Mandatory: `goal_reached == true`, `contact_count == 0`, `near_collision_count == 0`, `error_count == 0`
+     - Spatial Memory & Cognitive Quality (no `wall_time_s` pass/fail cutoff): `redundant_revisit_count == 0`, high `path_efficiency` (`reference_path_m / path_length_m`), low `backtrack_revisit_count`, plus observability breakdown (`active_drive_time_s`, `agent_think_time_s`, `command_burst_count`). Trigger `robot-engineer` (max 3 rounds) on any mandatory failure or `redundant_revisit_count > 0`.
+   - If passing criteria hold (or `i == 3`), stop the loop and present the round-by-round scorecard table to the user.
+   - Otherwise, record current `git rev-parse HEAD` (or diff checkpoint) and dispatch **`robot-engineer`** (`invoke_subagent` with `TypeName: "robot-engineer"`), passing the active mode (`Mode A` or `Mode B`), `telemetry stop` JSON scorecard, the driver's summary, and specific bottleneck to fix.
+   - **Regression Guard:** After Round `i + 1` runs, if `pytest` broke or Round `i + 1` regressed, revert unverified edits via `git checkout -- models/robot_2wheel.xml robot_sim robot_ctl.py` (and `.agents/skills/robot-multi-agent-rd/references/driver-brain-prompt.md` in Mode B) and run `.venv\Scripts\python.exe robot_ctl.py reload`.

@@ -72,6 +72,11 @@ uv run python robot_ctl.py reset --target-x -1.2 --target-y 1.0 --vision
 # 10. Tiếp cận khép kín 20Hz bám tâm trụ xanh kết hợp né vật cản gần
 .venv\Scripts\python.exe robot_ctl.py approach --stop-distance 0.25
 
+# 10b. Các công cụ phản xạ vô trạng thái cho chế độ thử nghiệm Agent-Brain (Mode B)
+.venv\Scripts\python.exe robot_ctl.py advance --max-dist 1.8 --speed 0.55
+.venv\Scripts\python.exe robot_ctl.py cross-gate --timeout 12.0
+.venv\Scripts\python.exe robot_ctl.py dock --stop-distance 0.25
+
 # 11. Xem danh sách 6 bản đồ địa hình chuẩn và chuyển đổi nóng ngay trên cửa sổ 3D đang mở!
 .venv\Scripts\python.exe robot_ctl.py arenas
 .venv\Scripts\python.exe robot_ctl.py reload --arena maze_a --vision
@@ -100,7 +105,7 @@ Antigravity sẽ đóng vai "bộ não" trên robot theo đúng vòng lặp **C�
 
 Dự án tích hợp sẵn Workspace Skill `.agents/skills/robot-multi-agent-rd/SKILL.md` vận hành 3 vai trò độc lập để tối ưu tốc độ và bảo vệ Context Window của Antigravity:
 1. **Main Agent (Tổng công trình sư):** Chọn sa bàn thử thách (`reload --arena maze_a` / `maze_b` / `maze_c` / `dynamic_a` / `dynamic_b` / `2wheel`), bật **Hộp đen Python 10 Hz** (`telemetry record --max-duration 360` tốn 0 token LLM) và chỉ đọc bảng điểm tóm tắt `~1 KB` (`telemetry stop`) sau mỗi vòng.
-2. **`robot-driver` (Subagent Lái mù Sim-to-Real):** Gọi trực tiếp `.venv\Scripts\python.exe robot_ctl.py` với các kỹ năng khép kín 20 Hz, hoàn toàn mù tọa độ và không biết mình đang ở bản đồ nào (tuyệt đối cấm `--debug`, cấm `arenas` và cấm đọc mã nguồn).
+2. **`robot-driver` (Subagent Lái mù Sim-to-Real):** Gọi trực tiếp `.venv\Scripts\python.exe robot_ctl.py` với các kỹ năng khép kín 20 Hz, hoàn toàn mù tọa độ và không biết mình đang ở bản đồ nào (tuyệt đối cấm `--debug`, cấm `arenas` và cấm đọc mã nguồn). Ngoài ra có chế độ thử nghiệm **Mode B (`agent-brain`, subagent `robot-driver-brain`)** trong đó AI Agent trực tiếp nắm bộ nhớ đồ thị & quyết định rẽ qua 3 công cụ vô trạng thái `advance`, `cross-gate`, `dock`.
 3. **`robot-engineer` (Subagent Mổ băng & Tinh chỉnh):** Khi chuyến chạy chưa đạt chuẩn, tự đối chiếu Hộp đen với mã nguồn, nâng cấp thuật toán điều hướng tổng quát trong `robot_sim/skills.py` hoặc gắn thêm/tinh chỉnh cảm biến & cơ khí trên `models/robot_2wheel.xml` (trong khi mọi bản đồ `models/arena_*.xml` bị khóa bất biến bởi `robot_sim/integrity.py`), chạy `pytest` và gọi `reload` để kiểm chứng ở vòng tiếp theo (tối đa 3 vòng).
 
 Bạn có thể kích hoạt ngay bằng câu lệnh trong khung chat:

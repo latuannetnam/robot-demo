@@ -36,3 +36,37 @@ def test_workspace_skill_and_agents_rules_follow_antigravity_conventions():
     assert ".venv\\Scripts\\python.exe" in agents_text
     assert "models/robot_2wheel.xml" in agents_text
     assert "--arena" in agents_text
+
+
+def test_agent_brain_mode_docs_and_driver_prompt():
+    skill_md = ROOT / ".agents" / "skills" / "robot-multi-agent-rd" / "SKILL.md"
+    driver_brain_ref = ROOT / ".agents" / "skills" / "robot-multi-agent-rd" / "references" / "driver-brain-prompt.md"
+    engineer_ref = ROOT / ".agents" / "skills" / "robot-multi-agent-rd" / "references" / "engineer-prompt.md"
+
+    assert driver_brain_ref.is_file(), "driver-brain-prompt.md does not exist"
+    brain_text = driver_brain_ref.read_text(encoding="utf-8")
+    for kw in (
+        ".venv\\Scripts\\python.exe robot_ctl.py",
+        "advance",
+        "cross-gate",
+        "dock",
+        "scan --no-recover-occlusion",
+        "camera --name front_cam",
+        "--debug",
+        "arenas",
+        "explore",
+        "approach",
+        "overview_cam",
+        "Node",
+        "odom_x_m",
+        "odom_y_m",
+        "gyro_yaw_deg",
+    ):
+        assert kw in brain_text
+
+    skill_text = skill_md.read_text(encoding="utf-8")
+    engineer_text = engineer_ref.read_text(encoding="utf-8")
+    for kw in ("Mode A", "auto-skill", "Mode B", "agent-brain", "driver-brain-prompt.md", "redundant_revisit_count"):
+        assert kw in skill_text
+    for kw in ("Mode B", "agent-brain", "driver-brain-prompt.md", "models/robot_2wheel.xml", "robot_sim/skills.py"):
+        assert kw in engineer_text

@@ -16,6 +16,13 @@ You are the Robotics Diagnostics & Control Systems Engineer for the MuJoCo 2-whe
   - NEVER hardcode arena IDs, map layouts, or junction/waypoint `(x, y)` coordinates in `robot_sim/skills.py` or `robot_ctl.py` (skills must rely exclusively on onboard sensors + Edge Vision and generalize to unseen maps).
   - NEVER teleport `qpos` or expose `debug` / `active_arena` fields to `robot-driver` or inside `robot_sim/skills.py`.
 
+## Mode B (`agent-brain`) Red Lines
+When diagnostics are triggered during a **Mode B (`agent-brain`)** experiment:
+- **ALLOWED:** Tune reasoning heuristics / Topological Scratchpad rules in `.agents/skills/robot-multi-agent-rd/references/driver-brain-prompt.md` and stateless reflex/safety thresholds inside `advance_segment`, `cross_dynamic_gate`, or `dock_target` in `robot_sim/skills.py`.
+- **FORBIDDEN IN MODE B:**
+  - NEVER modify `models/robot_2wheel.xml` or `models/arena_*.xml`.
+  - NEVER add cross-call persistent state, breadcrumbs, loop counters, or maze-solving heuristics (`rule=right/left`) into `advance_segment`, `cross_dynamic_gate`, `dock_target`, or `robot_ctl.py`. The AI subagent must remain the sole cognitive planner.
+
 ## Mandatory Verification Before Returning
 1. Add or update unit tests covering your improvement (ensuring blackbox telemetry reports `contact_count == 0`).
 2. Run the full test suite and ensure **100% pass** (including `tests/test_integrity.py` across all 6 arenas):
