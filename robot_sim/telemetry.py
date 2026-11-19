@@ -224,16 +224,15 @@ def record_telemetry(
                         if cell in cell_last_path and (path_length_m - cell_last_path[cell]) >= 0.80:
                             backtrack_revisit_count += 1
                         last_cell = cell
+                        if end_yaw_deg is not None:
+                            dir_q = int(((end_yaw_deg + 45.0) % 360.0) // 90.0)
+                            dcell = (cell, dir_q)
+                            if dcell != last_dir_cell:
+                                if dcell in dir_cell_last_path and (path_length_m - dir_cell_last_path[dcell]) >= 0.80:
+                                    redundant_revisit_count += 1
+                                last_dir_cell = dcell
+                            dir_cell_last_path[dcell] = path_length_m
                     cell_last_path[cell] = path_length_m
-
-                    if end_yaw_deg is not None:
-                        dir_q = int(((end_yaw_deg + 45.0) % 360.0) // 90.0)
-                        dcell = (cell, dir_q)
-                        if dcell != last_dir_cell:
-                            if dcell in dir_cell_last_path and (path_length_m - dir_cell_last_path[dcell]) >= 0.80:
-                                redundant_revisit_count += 1
-                            last_dir_cell = dcell
-                        dir_cell_last_path[dcell] = path_length_m
 
                 vis = st.get("vision", {})
                 t_vis = bool(vis.get("target_visible", False))

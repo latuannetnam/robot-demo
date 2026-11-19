@@ -90,7 +90,7 @@ def test_agent_brain_skills_validate_inputs_and_compute_open_branches():
     for bad_stop in (0.05, 1.6, float("nan")):
         with pytest.raises(ValueError):
             dock_target(dummy, stop_distance=bad_stop)
-    for bad_steps in (0, -3):
+    for bad_steps in (0, -3, float("inf"), float("nan"), True):
         with pytest.raises(ValueError):
             dock_target(dummy, max_steps=bad_steps)
 
@@ -230,6 +230,41 @@ def test_cross_dynamic_gate_and_dock_target_refusal_unit():
     )
     assert d_too_far["reached"] is False and d_too_far["reason"] == "too_far"
     assert "debug" not in d_too_far["after_status"]
+
+    # Spec 5.2.C threshold: rf_center > 1.25 and area_pct < 0.90 -> too_far
+    d_too_far_spec = dock_target(
+        _MockBotBridge([
+            {
+                "rangefinders_m": {"left": 1.5, "center": 1.50, "right": 1.5, "left90": 1.0, "right90": 1.0},
+                "vision": {"target_visible": True, "target": {"offset_x": 0.0, "area_pct": 0.60}, "obstacles": []},
+            }
+        ]),
+    )
+    assert d_too_far_spec["reached"] is False and d_too_far_spec["reason"] == "too_far"
+    assert "debug" not in d_too_far_spec["after_status"]
+
+    # Frozen sim_time wait in cross_dynamic_gate breaks fast instead of hanging 18s
+    frozen_gate = _MockBotBridge(
+        [
+            {"sim_time": 1.0, "rangefinders_m": {"left": 0.9, "center": 0.55, "right": 0.9, "left90": 0.4, "right90": 0.4},
+             "vision": {"target_visible": False, "target": None, "obstacles": []}},
+        ],
+        advance_odom_on_drive=False,
+    )
+    t_start = time.monotonic()
+    res_frozen = cross_dynamic_gate(frozen_gate, timeout_s=5.0)
+    assert (time.monotonic() - t_start) < 2.0
+    assert res_frozen["crossed"] is False and res_frozen["reason"] == "timeout"
+
+    # Stalled sprint odom_dist_m=0 across loop does not falsely report crossed=True, cleared
+    stalled_sprint_states = [
+        {"sim_time": float(i) * 0.1, "odom_dist_m": 0.0,
+         "rangefinders_m": {"left": 0.9, "center": 1.2, "right": 0.9, "left90": 0.4, "right90": 0.4},
+         "vision": {"target_visible": False, "target": None, "obstacles": []}}
+        for i in range(160)
+    ]
+    res_stalled = cross_dynamic_gate(_MockBotBridge(stalled_sprint_states, advance_odom_on_drive=False), timeout_s=3.0)
+    assert res_stalled["crossed"] is False and res_stalled["reason"] == "timeout"
 
     d_blocked = dock_target(
         _MockBotBridge([
@@ -385,3 +420,17 @@ def test_agent_brain_skills_cross_dynamic_a_lane_by_lane_and_dynamic_b_s_curve()
     res_b = _run_headless_episode("dynamic_b", _solve_dyn_b)
     assert res_b["dock"] is not None and res_b["dock"]["reached"] is True
     assert res_b["raw_debug"]["contact_count"] == 0
+
+
+def test_advance_segment_2wheel_classifies_static_obstacle_without_dynamic_false_positive():
+    def _probe_2wheel_static(call_fn, out: dict) -> None:
+        # Turn toward static obs_red at (0.70, 0.95) (~+53.6 deg) and cruise into it
+        closed_loop_turn(call_fn, degrees=53.6, max_speed_deg_s=180.0, tol_deg=1.0, fast_settle=True)
+        res = advance_segment(call_fn, max_dist=1.4, speed_m_s=0.50, step_dt=0.10)
+        assert "debug" not in res["after_status"]
+        out["res"] = res
+
+    result = _run_headless_episode("2wheel", _probe_2wheel_static)
+    assert result["res"]["event"] == "static_obstacle_ahead"
+    assert result["res"]["obstacle"]["motion"] == "static"
+    assert result["raw_debug"]["contact_count"] == 0

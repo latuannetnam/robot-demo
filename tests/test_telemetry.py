@@ -312,3 +312,49 @@ def test_telemetry_cognitive_metrics_directed_revisits_and_custom_target(tmp_pat
     assert s2["redundant_revisit_count"] == 0
 
 
+def test_telemetry_optimal_dfs_in_place_spins_yield_zero_redundant_revisits(tmp_path: Path, monkeypatch):
+    from robot_sim.telemetry import record_telemetry
+
+    out_json = tmp_path / "hub_dfs.json"
+    stop_file = tmp_path / ".hub_stop"
+    # Simulate 10Hz optimal DFS at (-1.5, 0.0) hub including gradual in-place yaw rotations
+    hub_trace = [
+        (True,  0.3, [-1.50,  0.00], 180.0),  # enter hub facing W
+        (True,  0.0, [-1.50,  0.00], 135.0),  # spin in place inside hub toward N
+        (True,  0.0, [-1.50,  0.00],  90.0),  # settled N inside hub before leaving!
+        (True,  0.4, [-1.50,  0.40],  90.0),
+        (True,  0.4, [-1.50,  0.80],  90.0),
+        (True,  0.0, [-1.50,  0.80], -90.0),  # dead-end U-turn
+        (True,  0.4, [-1.50,  0.40], -90.0),
+        (True,  0.3, [-1.50,  0.00], -90.0),  # backtrack entry #1: facing S
+        (True,  0.4, [-1.50, -0.40], -90.0),
+        (True,  0.4, [-1.50, -0.80], -90.0),
+        (True,  0.0, [-1.50, -0.80],  90.0),  # dead-end U-turn
+        (True,  0.4, [-1.50, -0.40],  90.0),
+        (True,  0.3, [-1.50,  0.00],  90.0),  # backtrack entry #2: facing N (must be 0 redundant!)
+        (True,  0.0, [-1.50,  0.00],  45.0),  # spin in place toward E
+        (True,  0.0, [-1.50,  0.00],   0.0),
+        (True,  0.4, [-1.15,  0.00],   0.0),  # exit E
+    ]
+    idx = 0
+
+    def fake_fetch(_url: str, timeout: float = 4.0) -> dict:
+        nonlocal idx
+        m, spd, xy, yaw = hub_trace[idx]
+        idx += 1
+        if idx >= len(hub_trace):
+            stop_file.write_text("stop\n", encoding="utf-8")
+        return {
+            "sim_time": 0.1 * idx,
+            "moving": m,
+            "sensors": {"rangefinders_m": {"center": 1.0}, "forward_speed_m_s": spd, "yaw_rate_rad_s": 0.0},
+            "vision": {"target_visible": False, "target": None, "obstacles": []},
+            "debug": {"arena": "maze_c", "robot_xy": xy, "robot_yaw_deg": yaw, "target_xy": [1.6, 1.6], "contact_count": 0},
+        }
+
+    monkeypatch.setattr("robot_sim.telemetry._fetch_raw_status", fake_fetch)
+    s = record_telemetry("http://127.0.0.1:8765", out_path=out_json, stop_flag_path=stop_file, hz=100.0)
+    assert s["backtrack_revisit_count"] >= 2
+    assert s["redundant_revisit_count"] == 0
+
+
