@@ -351,3 +351,80 @@ def test_cli_agent_brain_subcommands_run_strip_debug_and_validate_args(capsys):
     assert res["bad_gate"][0] == 1 and "Lỗi điều khiển robot" in res["bad_gate"][1]
 
 
+
+
+def test_cli_hybrid_go_topo_isolation_and_no_mode_ab_state_file(capsys, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(robot_ctl, "DEFAULT_TOPO_STATE_PATH", tmp_path / ".topo_state.json")
+    state_file = tmp_path / ".topo_state.json"
+
+    app = SimulationApp()
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    stop_evt = threading.Event()
+    out: dict = {}
+    err_holder: list[BaseException] = []
+
+    def worker():
+        try:
+            # Review Focus #4: Mode B commands alone must NOT create .topo_state.json
+            assert robot_ctl.main(["--url", url, "reset", "--target-x", "1.1", "--target-y", "0.0"]) == 0
+            capsys.readouterr()
+            assert robot_ctl.main(["--url", url, "advance", "--max-dist", "0.25", "--speed", "0.35"]) == 0
+            capsys.readouterr()
+            assert not state_file.exists()
+
+            # Mode C: topo show initializes session & strips debug
+            assert robot_ctl.main(["--url", url, "topo", "show"]) == 0
+            out["topo_show"] = json.loads(capsys.readouterr().out)
+            assert state_file.is_file()
+
+            # Add a second URL session to verify isolated reset
+            from robot_sim.topo import TopologicalOdometer
+
+            TopologicalOdometer("http://127.0.0.1:59888", state_path=state_file).observe_status(
+                out["topo_show"]["after_status"]
+            )
+
+            # go moves toward target and strips debug
+            assert robot_ctl.main(["--url", url, "go", "--cardinal", "E", "--max-dist", "1.2", "--speed", "0.45"]) == 0
+            out["go"] = json.loads(capsys.readouterr().out)
+
+            # Invalid mutually exclusive flags return non-zero exit code (argparse)
+            try:
+                robot_ctl.main(["--url", url, "go", "--cardinal", "E", "--heading-deg", "90"])
+                out["mutex_rejected"] = False
+            except SystemExit as exc:
+                capsys.readouterr()
+                out["mutex_rejected"] = exc.code != 0
+
+            # topo reset clears only `url`, keeping 59888 session intact
+            assert robot_ctl.main(["--url", url, "topo", "reset"]) == 0
+            out["topo_reset"] = json.loads(capsys.readouterr().out)
+            out["other_alive"] = TopologicalOdometer.has_active_session("http://127.0.0.1:59888", state_path=state_file)
+            out["self_alive"] = TopologicalOdometer.has_active_session(url, state_path=state_file)
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=10)
+            time.sleep(0.004)
+        t.join(timeout=20.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    assert "topo" in out["topo_show"] and "open_cardinals" in out["topo_show"]
+    assert "debug" not in json.dumps(out["topo_show"])
+    assert out["go"]["event"] in {"target_ready", "max_dist", "static_obstacle_ahead"}
+    assert "topo" in out["go"] and "open_cardinals" in out["go"]
+    assert "debug" not in json.dumps(out["go"])
+    assert out["mutex_rejected"] is True
+    assert out["topo_reset"]["reset"] is True
+    assert out["other_alive"] is True and out["self_alive"] is False

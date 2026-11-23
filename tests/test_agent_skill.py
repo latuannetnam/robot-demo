@@ -74,3 +74,58 @@ def test_agent_brain_mode_docs_and_driver_prompt():
         assert kw in skill_text
     for kw in ("Mode B", "agent-brain", "driver-brain-prompt.md", "models/robot_2wheel.xml", "robot_sim/skills.py"):
         assert kw in engineer_text
+
+
+def test_hybrid_brain_mode_c_docs_driver_prompt_and_studio_messages():
+    skill_md = ROOT / ".agents" / "skills" / "robot-multi-agent-rd" / "SKILL.md"
+    hybrid_ref = ROOT / ".agents" / "skills" / "robot-multi-agent-rd" / "references" / "driver-hybrid-prompt.md"
+    engineer_ref = ROOT / ".agents" / "skills" / "robot-multi-agent-rd" / "references" / "engineer-prompt.md"
+    studio_msgs = (ROOT / "studio" / "messages.py").read_text(encoding="utf-8")
+    studio_sim = (ROOT / "studio" / "sim_plugin.py").read_text(encoding="utf-8")
+    studio_viewer = (ROOT / "studio" / "viewer_plugin.py").read_text(encoding="utf-8")
+
+    assert hybrid_ref.is_file(), "driver-hybrid-prompt.md does not exist"
+    hybrid_text = hybrid_ref.read_text(encoding="utf-8")
+    for kw in (
+        ".venv\\Scripts\\python.exe robot_ctl.py",
+        "topo show",
+        "go",
+        "cross-gate",
+        "dock",
+        "scan --no-recover-occlusion",
+        "camera --name front_cam",
+        "--debug",
+        "arenas",
+        "topo reset",
+        "explore",
+        "approach",
+        "overview_cam",
+        "out_visits == 0",
+        "redundant_revisit_count == 0",
+        "loop_closed",
+        "static_obstacle_ahead",
+        "event == \"max_dist\"",
+    ):
+        assert kw in hybrid_text
+
+    skill_text = skill_md.read_text(encoding="utf-8")
+    engineer_text = engineer_ref.read_text(encoding="utf-8")
+    for kw in (
+        "Mode A",
+        "Mode B",
+        "Mode C",
+        "hybrid-brain",
+        "robot-driver-hybrid",
+        "driver-hybrid-prompt.md",
+        "--max-duration 480",
+    ):
+        assert kw in skill_text
+    for kw in ("Mode C", "hybrid-brain", "driver-hybrid-prompt.md", "topo.py", "go_to_decision"):
+        assert kw in engineer_text
+
+    assert "topo_node_count: int = 0" in studio_msgs
+    assert "topo_current_node: int = -1" in studio_msgs
+    assert "topo_open_exits: int = 0" in studio_msgs
+    assert "read_topo_studio_summary" in studio_sim
+    assert "Topo Graph:" in studio_viewer
+    assert ".topo_state.json" not in studio_viewer  # viewer must never perform 60 FPS disk I/O

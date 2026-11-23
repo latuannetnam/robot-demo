@@ -23,6 +23,13 @@ When diagnostics are triggered during a **Mode B (`agent-brain`)** experiment:
   - NEVER modify `models/robot_2wheel.xml` or `models/arena_*.xml`.
   - NEVER add cross-call persistent state, breadcrumbs, loop counters, or maze-solving heuristics (`rule=right/left`) into `advance_segment`, `cross_dynamic_gate`, `dock_target`, or `robot_ctl.py`. The AI subagent must remain the sole cognitive planner.
 
+## Mode C (`hybrid-brain`) Red Lines
+When diagnostics are triggered during a **Mode C (`hybrid-brain`)** experiment:
+- **ALLOWED:** Tune tactical graph rules in `.agents/skills/robot-multi-agent-rd/references/driver-hybrid-prompt.md`, System 1 safety/chaining thresholds in `go_to_decision` / `advance_segment` / `cross_dynamic_gate` / `dock_target` (`robot_sim/skills.py`), and node-matching/port-accounting tolerances in `robot_sim/topo.py`.
+- **FORBIDDEN IN MODE C:**
+  - NEVER modify `models/robot_2wheel.xml` or `models/arena_*.xml`.
+  - NEVER embed branch-selection logic, BFS/DFS/A* pathfinding, automatic `180°` dead-end U-turns, parent-node dead-end propagation, or `suggested_exit` hints into `robot_sim/topo.py`, `go_to_decision`, or `robot_ctl.py`. System 2 (`robot-driver-hybrid`) must remain the sole decision-maker whenever `>= 2` options exist.
+
 ## Mandatory Verification Before Returning
 1. Add or update unit tests covering your improvement (ensuring blackbox telemetry reports `contact_count == 0`).
 2. Run the full test suite and ensure **100% pass** (including `tests/test_integrity.py` across all 6 arenas):

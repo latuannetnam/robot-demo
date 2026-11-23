@@ -13,6 +13,7 @@ from pathlib import Path
 import queue
 import sys
 import threading
+import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -55,6 +56,7 @@ from robot_sim.core import (
     compute_turn_command,
 )
 from robot_sim.integrity import verify_arena_integrity
+from robot_sim.topo import DEFAULT_TOPO_STATE_PATH, read_topo_studio_summary
 
 
 def _read_rf(data: mujoco.MjData, sensor_name: str) -> float:
@@ -254,6 +256,9 @@ class SimPlugin(plugin.SimPlugin):
   _vision_cache: dict[str, tuple[tuple, dict]] | None = None
   _cmd_queue: queue.Queue | None = None
   _pending_reload_resp: tuple[queue.Queue, tuple[float, float] | None, bool, np.ndarray | None] | None = None
+  _topo_poll_wall: float = 0.0
+  _topo_mtime_ns: int = -1
+  _topo_summary: tuple[int, int, int] = (0, -1, 0)
 
   def _ensure_runtime_fields(self) -> None:
     if self._cmd_queue is None:
@@ -298,6 +303,15 @@ class SimPlugin(plugin.SimPlugin):
     self._contact_steps = 0
     self._in_hazard_contact = False
     self._state_epoch += 1
+    try:
+      self._topo_mtime_ns = (
+          DEFAULT_TOPO_STATE_PATH.stat().st_mtime_ns
+          if DEFAULT_TOPO_STATE_PATH.is_file()
+          else -1
+      )
+    except OSError:
+      self._topo_mtime_ns = -1
+    self._topo_summary = (0, -1, 0)
     if self._vision_cache is not None:
       self._vision_cache.clear()
 
@@ -846,6 +860,25 @@ class SimPlugin(plugin.SimPlugin):
     if self._step_counter % 10 == 0:
       self._publish_telemetry(data)
 
+  def _poll_topo_summary(self) -> tuple[int, int, int]:
+    now = time.monotonic()
+    if (now - self._topo_poll_wall) < 0.5:
+      return self._topo_summary
+    self._topo_poll_wall = now
+    try:
+      if not DEFAULT_TOPO_STATE_PATH.is_file():
+        self._topo_mtime_ns = -1
+        self._topo_summary = (0, -1, 0)
+        return self._topo_summary
+      mtime_ns = DEFAULT_TOPO_STATE_PATH.stat().st_mtime_ns
+      if mtime_ns != self._topo_mtime_ns:
+        summary = read_topo_studio_summary()
+        self._topo_summary = summary
+        self._topo_mtime_ns = mtime_ns
+    except OSError:
+      pass
+    return self._topo_summary
+
   def _publish_telemetry(self, data: mujoco.MjData) -> None:
     try:
       l_cmd = float(data.actuator('left_motor').ctrl[0])
@@ -856,6 +889,7 @@ class SimPlugin(plugin.SimPlugin):
     except KeyError:
       l_cmd = r_cmd = l_vel = r_vel = fwd_v = 0.0
 
+    topo_nodes, topo_cur, topo_open = self._poll_topo_summary()
     self.handle.send_to_viewer(
         user_messages.RobotTelemetry(
             arena_id=self.arena_id,
@@ -877,5 +911,8 @@ class SimPlugin(plugin.SimPlugin):
             rf_right120=_read_rf(data, 'rf_right120'),
             contact_count=self._contact_count,
             in_contact=self._in_hazard_contact,
+            topo_node_count=topo_nodes,
+            topo_current_node=topo_cur,
+            topo_open_exits=topo_open,
         )
     )

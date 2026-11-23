@@ -2405,6 +2405,8 @@ def advance_segment(
     max_dist: float = 1.8,
     speed_m_s: float = 0.55,
     step_dt: float = 0.10,
+    *,
+    _out_meta: dict | None = None,
 ) -> dict:
     """Tiến thẳng một đoạn hành lang/sân mở hoàn toàn vô trạng thái và dừng ngay khi gặp sự kiện."""
     _require_finite(max_dist=max_dist, speed_m_s=speed_m_s, step_dt=step_dt)
@@ -2445,6 +2447,10 @@ def advance_segment(
             odom_m += abs(float(sens.get("forward_speed_m_s", 0.0))) * dt_s
         return odom_m - odom0
 
+    saw_left_wall = l90_0 <= 0.55
+    saw_right_wall = r90_0 <= 0.55
+    saw_corridor_wall = min(l90_0, r90_0) <= 0.60
+
     def _finish_result(
         event: str,
         end_st: dict,
@@ -2460,6 +2466,10 @@ def advance_segment(
             end_st = _stop_and_settle(call_fn, include_vision=True)
         moved = round(max(0.0, _sync_local_odom(end_st)), 4)
         rf_e = end_st["sensors"]["rangefinders_m"]
+        if _out_meta is not None:
+            _out_meta["saw_corridor_wall"] = bool(
+                saw_corridor_wall or saw_left_wall or saw_right_wall
+            )
         return {
             "event": event,
             "moved_m": moved,
@@ -2476,31 +2486,44 @@ def advance_segment(
     ignored_static_colors: set[str] = set()
 
     try:
-        # Chờ đầu nhánh rộng có piston nép hốc (<= 2.2s sim-time) chỉ khi thấy đích từ xa dọc hành lang hẹp
+        def _has_probe_candidate(vis_d: dict) -> bool:
+            return any(
+                (
+                    _estimate_obs_cam_dist_m(o) <= 0.78
+                    and abs(float(o.get("offset_x", 0.0))) < 0.78
+                )
+                or (
+                    _estimate_obs_cam_dist_m(o) <= 0.65
+                    and abs(float(o.get("offset_x", 0.0))) < 0.95
+                )
+                for o in vis_d.get("obstacles", [])
+            )
+
+        # Chờ đầu nhánh rộng có piston nép hốc (<= 4.5s sim-time) chỉ khi thấy đích từ xa dọc hành lang hẹp
         vis0 = st.get("vision", {})
         if (
             in_narrow_0
             and vis0.get("target_visible")
-            and not vis0.get("obstacles")
+            and not _has_probe_candidate(vis0)
             and abs(float(vis0["target"]["offset_x"])) < 0.25
             and float(rf0["center"]) > 1.05
-            and min(float(rf0["left"]), float(rf0["right"])) > 0.50
+            and min(float(rf0["left"]), float(rf0["right"])) > 0.30
             and min(l90_0, r90_0) >= 0.24
             and (l90_0 + r90_0) >= 0.72
         ):
             t_p0 = float(st.get("sim_time", 0.0))
             prev_p_sim = t_p0
             stagnant = 0
-            p_deadline = time.monotonic() + 3.5
+            p_deadline = time.monotonic() + 7.0
             while time.monotonic() < p_deadline:
                 call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": watchdog_dur})
                 time.sleep(0.015)
                 st = call_fn("/status?vision=1", "GET", None)
                 _sync_local_odom(st)
-                if st.get("vision", {}).get("obstacles"):
+                if _has_probe_candidate(st.get("vision", {})):
                     break
                 cur_p_sim = float(st.get("sim_time", t_p0))
-                if (cur_p_sim - t_p0) >= 2.2:
+                if (cur_p_sim - t_p0) >= 4.5:
                     break
                 if abs(cur_p_sim - prev_p_sim) < 1e-6:
                     stagnant += 1
@@ -2520,9 +2543,12 @@ def advance_segment(
             min_f = min(float(p_rf["left"]), float(p_rf["center"]), float(p_rf["right"]))
             if motion == "dynamic":
                 if min_f < 0.34 or obs_sum["est_dist_m"] < 0.26:
+                    p_l90 = float(p_rf.get("left90", 3.0))
+                    p_r90 = float(p_rf.get("right90", 3.0))
+                    back_m = -0.05 if min(p_l90, p_r90) > 0.75 else -0.10
                     probe_st = closed_loop_move(
                         call_fn,
-                        meters=-0.10,
+                        meters=back_m,
                         speed_m_s=0.25,
                         safety_stop_m=0.0,
                         include_vision=True,
@@ -2601,12 +2627,13 @@ def advance_segment(
                     or ("right120" in rf_s and float(rf_s["right120"]) > 0.72)
                 )
             ):
-                # Chờ ngắn tới 1.2s sim-time nếu left120/right120 mở (piston có thể đang che góc ±90° tại ngã rẽ)
+                # Chờ tới 5.2s sim-time nếu left120/right120 mở (piston có thể đang che góc ±90° tại ngã rẽ)
                 t_c0 = float(settled.get("sim_time", 0.0))
                 prev_c_sim = t_c0
                 stagnant_c = 0
-                for _ in range(30):
-                    if (float(settled.get("sim_time", t_c0)) - t_c0) >= 1.2:
+                c_deadline = time.monotonic() + 7.5
+                for _ in range(180):
+                    if time.monotonic() >= c_deadline or (float(settled.get("sim_time", t_c0)) - t_c0) >= 5.2:
                         break
                     call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.25})
                     time.sleep(0.012)
@@ -2617,7 +2644,7 @@ def advance_segment(
                     cur_c_sim = float(settled.get("sim_time", t_c0))
                     if abs(cur_c_sim - prev_c_sim) < 1e-6:
                         stagnant_c += 1
-                        if stagnant_c >= 2:
+                        if stagnant_c >= 4:
                             break
                     else:
                         stagnant_c = 0
@@ -2634,8 +2661,6 @@ def advance_segment(
             stopped_cleanly = True
             return _resolve_front_block(st, do_settle=False)
 
-        saw_left_wall = l90_0 <= 0.55
-        saw_right_wall = r90_0 <= 0.55
         left_edge_odom = odom0 + 0.10 if saw_left_wall else odom0
         right_edge_odom = odom0 + 0.10 if saw_right_wall else odom0
         left_open_streak = 0
@@ -2674,6 +2699,8 @@ def advance_segment(
             rf_r120 = float(rf.get("right120", 3.0))
             has_120 = ("left120" in rf) and ("right120" in rf)
             in_narrow_now = (rf_l90 + rf_r90) < 1.35 or rf_l90 < 0.52 or rf_r90 < 0.52
+            if min(rf_l90, rf_r90) <= 0.60:
+                saw_corridor_wall = True
 
             # Kiểm tra vật cản & target_ready trước
             obs_res = _check_obstacle_event(st)
@@ -2846,9 +2873,12 @@ def cross_dynamic_gate(call_fn: BridgeCall, timeout_s: float = 12.0) -> dict:
         if min(float(rf_now["left"]), float(rf_now["center"]), float(rf_now["right"])) < 0.34 or any(
             _estimate_obs_cam_dist_m(o) < 0.26 for o in cur_obs
         ):
+            n_l90 = float(rf_now.get("left90", 3.0))
+            n_r90 = float(rf_now.get("right90", 3.0))
+            back_m = -0.05 if min(n_l90, n_r90) > 0.75 else -0.10
             st = closed_loop_move(
                 call_fn,
-                meters=-0.10,
+                meters=back_m,
                 speed_m_s=0.25,
                 safety_stop_m=0.0,
                 include_vision=True,
@@ -2856,14 +2886,15 @@ def cross_dynamic_gate(call_fn: BridgeCall, timeout_s: float = 12.0) -> dict:
             )["after_status"]
             _sync_local_odom(st)
 
-        # Nếu cánh ngoài đang lao vào tâm mà camera thẳng chưa thấy vật cản, chờ tối đa 3.0s sim-time cho nó quét qua
+        # Nếu cánh ngoài đang lao vào tâm mà camera thẳng chưa thấy vật cản, chờ tối đa 5.0s sim-time cho nó quét qua
         if wing_approaching and not any(
             _estimate_obs_cam_dist_m(o) <= 0.90 for o in st.get("vision", {}).get("obstacles", [])
         ):
             t_app0 = float(st.get("sim_time", 0.0))
-            app_wait_s = min(3.0, timeout_s)
+            app_wait_s = min(5.0, timeout_s)
             prev_app_sim = t_app0
-            for _ in range(45):
+            stagnant_app = 0
+            for _ in range(120):
                 if (float(st.get("sim_time", t_app0)) - t_app0) >= app_wait_s:
                     break
                 call_fn("/wheels", "POST", {"left": 0.0, "right": 0.0, "duration": 0.25})
@@ -2878,7 +2909,11 @@ def cross_dynamic_gate(call_fn: BridgeCall, timeout_s: float = 12.0) -> dict:
                     break
                 cur_app_sim = float(st.get("sim_time", t_app0))
                 if abs(cur_app_sim - prev_app_sim) < 1e-6:
-                    break
+                    stagnant_app += 1
+                    if stagnant_app >= 4:
+                        break
+                else:
+                    stagnant_app = 0
                 prev_app_sim = cur_app_sim
 
         # Chờ khe hở 2 nhịp liên tiếp theo hướng rút lui
@@ -3221,3 +3256,184 @@ def dock_target(
     finally:
         if not stopped_cleanly:
             call_fn("/stop", "POST", {})
+
+
+def go_to_decision(
+    call_fn: BridgeCall,
+    *,
+    cardinal: str | None = None,
+    heading_deg: float | None = None,
+    max_dist: float = 6.0,
+    speed_m_s: float = 0.55,
+    step_dt: float = 0.10,
+    max_chain: int = 6,
+    auto_chain: bool = True,
+    topo=None,
+) -> dict:
+    """System 1 gộp (Mode C): xoay khóa hướng, tiến phản xạ 20 Hz, tự lướt góc chữ L 1 lối đi và đồng bộ TopologicalOdometer."""
+    from robot_sim.topo import (
+        NODE_MATCH_RADIUS_M,
+        TopologicalOdometer,
+        branches_to_cardinals,
+        cardinal_to_deg,
+    )
+
+    if cardinal is not None and heading_deg is not None:
+        raise ValueError("Chỉ được truyền một trong hai tham số 'cardinal' hoặc 'heading_deg'.")
+    _require_finite(max_dist=max_dist, speed_m_s=speed_m_s, step_dt=step_dt)
+    if heading_deg is not None:
+        _require_finite(heading_deg=heading_deg)
+    max_wheel_linear = MAX_WHEEL_RAD_S * WHEEL_RADIUS
+    if max_dist <= 0.0:
+        raise ValueError("Tham số 'max_dist' phải lớn hơn 0.")
+    if speed_m_s < 0.05 or speed_m_s > max_wheel_linear:
+        raise ValueError(f"Tốc độ 'speed_m_s' phải nằm trong khoảng [0.05, {max_wheel_linear:.2f}] m/s.")
+    if step_dt < 0.04 or step_dt > 1.0:
+        raise ValueError("Chu kỳ điều khiển 'step_dt' phải nằm trong đoạn [0.04, 1.0] giây.")
+    if isinstance(max_chain, bool) or not isinstance(max_chain, int) or max_chain < 1:
+        raise ValueError("Tham số 'max_chain' phải là số nguyên dương (>= 1).")
+
+    target_deg: float | None = None
+    if cardinal is not None:
+        target_deg = cardinal_to_deg(cardinal)
+    elif heading_deg is not None:
+        target_deg = float(heading_deg)
+
+    active_topo = topo if topo is not None else TopologicalOdometer(auto_persist=False)
+
+    # Bước 1: Quan sát nút hiện tại, xoay khóa hướng đầu lệnh (nếu yêu cầu), cập nhật lại tia cảm biến trước khi rời nút
+    st = call_fn("/status?vision=1", "GET", None)
+    active_topo.observe_status(st)
+
+    if target_deg is not None:
+        cur_yaw = float(st["sensors"]["gyro_yaw_deg"])
+        turn_deg = _wrap_angle_deg(target_deg - cur_yaw)
+        if abs(turn_deg) > 3.0:
+            st = closed_loop_turn(
+                call_fn,
+                degrees=turn_deg,
+                max_speed_deg_s=200.0,
+                tol_deg=1.2,
+                include_vision=True,
+                release_stop=False,
+                fast_settle=True,
+            )["after_status"]
+            active_topo.observe_status(st)
+
+    active_topo.begin_leg(st)
+
+    # Bước 2: Chạy chặng phản xạ 20 Hz và tự nối qua góc chữ L chỉ có đúng 1 hướng rẽ ngang
+    remaining_dist = float(max_dist)
+    total_moved_m = 0.0
+    segments_chained = 0
+    auto_l_turns: list[str] = []
+    any_corridor_wall = False
+    max_segments = max_chain if auto_chain else 1
+    seg_res: dict | None = None
+
+    while segments_chained < max_segments and (segments_chained == 0 or remaining_dist > 0.02):
+        rf_cur = st["sensors"]["rangefinders_m"]
+        l90 = float(rf_cur.get("left90", 3.0))
+        r90 = float(rf_cur.get("right90", 3.0))
+        l120 = float(rf_cur.get("left120", 3.0))
+        r120 = float(rf_cur.get("right120", 3.0))
+        truly_open_field = (min(l90, r90, l120, r120) > 1.35) or (
+            active_topo.is_open_space_start() and l90 > 0.85 and r90 > 0.85
+        )
+        seg_max = min(1.8 if truly_open_field else 3.5, remaining_dist)
+
+        seg_meta: dict[str, bool] = {}
+        seg_res = advance_segment(
+            call_fn,
+            max_dist=seg_max,
+            speed_m_s=speed_m_s,
+            step_dt=step_dt,
+            _out_meta=seg_meta,
+        )
+        segments_chained += 1
+        seg_moved = float(seg_res["moved_m"])
+        total_moved_m += seg_moved
+        remaining_dist = max(0.0, float(max_dist) - total_moved_m)
+        seg_saw_wall = bool(seg_meta.get("saw_corridor_wall", False))
+        any_corridor_wall = any_corridor_wall or seg_saw_wall
+        st = seg_res["after_status"]
+
+        if not auto_chain or segments_chained >= max_segments or remaining_dist <= 0.15:
+            break
+        if segments_chained >= 2 and seg_moved < 0.20:
+            break
+
+        # Kiểm tra 5 điều kiện bắt buộc để tự động lướt góc chữ L 1 lối đi
+        if seg_res["event"] != "junction":
+            break
+        end_sens = st["sensors"]
+        end_x = float(end_sens.get("odom_x_m", 0.0))
+        end_y = float(end_sens.get("odom_y_m", 0.0))
+        if active_topo.nearest_existing_node(end_x, end_y, radius_m=NODE_MATCH_RADIUS_M) is not None:
+            break
+
+        branches = list(seg_res["open_branches"])
+        if branches not in (["left"], ["right"]):
+            break
+
+        vis = st.get("vision", {})
+        if vis.get("target_visible") or vis.get("obstacles"):
+            break
+
+        rf_end = end_sens["rangefinders_m"]
+        end_l90 = float(rf_end.get("left90", 3.0))
+        end_r90 = float(rf_end.get("right90", 3.0))
+        end_l120 = float(rf_end.get("left120", 3.0))
+        end_r120 = float(rf_end.get("right120", 3.0))
+        blocked_side_rf = end_r90 if branches == ["left"] else end_l90
+        corridor_context = seg_saw_wall or (
+            blocked_side_rf <= 0.55 and min(end_l120, end_r120) < 1.35
+        )
+        if not corridor_context:
+            break
+
+        branch = branches[0]
+        cur_yaw = float(end_sens["gyro_yaw_deg"])
+        next_yaw = round((cur_yaw + (90.0 if branch == "left" else -90.0)) / 90.0) * 90.0
+        delta_deg = _wrap_angle_deg(next_yaw - cur_yaw)
+        st = closed_loop_turn(
+            call_fn,
+            degrees=delta_deg,
+            max_speed_deg_s=200.0,
+            tol_deg=1.2,
+            include_vision=True,
+            release_stop=False,
+            fast_settle=True,
+        )["after_status"]
+        auto_l_turns.append(branch)
+
+    assert seg_res is not None
+    final_st = seg_res["after_status"]
+    rf_final = final_st["sensors"]["rangefinders_m"]
+    end_in_corridor = any_corridor_wall or (
+        min(float(rf_final.get("left90", 3.0)), float(rf_final.get("right90", 3.0))) <= 0.60
+        or float(rf_final.get("center", 3.0)) <= 0.55
+    )
+    if active_topo.is_open_space_start() and not any_corridor_wall:
+        end_in_corridor = False
+
+    topo_snap = active_topo.finish_go(
+        seg_res["event"],
+        total_moved_m,
+        final_st,
+        in_corridor=end_in_corridor,
+    )
+    final_yaw = float(final_st["sensors"]["gyro_yaw_deg"])
+    final_branches = list(seg_res["open_branches"])
+    return {
+        "event": seg_res["event"],
+        "moved_m": round(total_moved_m, 4),
+        "segments_chained": segments_chained,
+        "auto_l_turns": auto_l_turns,
+        "open_branches": final_branches,
+        "open_cardinals": branches_to_cardinals(final_branches, final_yaw),
+        "obstacle": seg_res["obstacle"],
+        "flank_clearance_m": seg_res["flank_clearance_m"],
+        "topo": topo_snap,
+        "after_status": _clean_status(final_st),
+    }

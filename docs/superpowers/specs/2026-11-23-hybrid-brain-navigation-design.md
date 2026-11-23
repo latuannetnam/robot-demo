@@ -1,8 +1,9 @@
 # Thiết kế Hệ thống Điều hướng Lai Phân tầng System 1 / System 2 (`hybrid-brain` — Mode C)
 
 **Ngày thiết kế:** 2026-11-23  
-**Trạng thái:** Bản thảo chờ người dùng phê duyệt (trước bước lập kế hoạch thi công `writing-plans`)  
-**Phạm vi:** Bộ định vị đồ thị khách quan (`robot_sim/topo.py`), kỹ năng vận động gộp System 1 (`robot_sim/skills.py`, `robot_ctl.py`), cấu hình đa tác tử Mode C (`.agents/skills/robot-multi-agent-rd/`), tích hợp theo dõi trên MuJoCo Studio (`studio/`), và bộ kiểm thử tự động (`tests/`).
+**Quy mô công việc:** Dự án đầy đủ (Full Project Design)  
+**Trạng thái:** Đã được người dùng phê duyệt (Approved)  
+**Phạm vi:** Bộ định vị đồ thị khách quan ([robot_sim/topo.py](file:///d:/latuan/Programming/robot-demo/robot_sim/topo.py)), kỹ năng vận động gộp System 1 ([robot_sim/skills.py](file:///d:/latuan/Programming/robot-demo/robot_sim/skills.py), [robot_ctl.py](file:///d:/latuan/Programming/robot-demo/robot_ctl.py)), cấu hình đa tác tử Mode C ([.agents/skills/robot-multi-agent-rd/](file:///d:/latuan/Programming/robot-demo/.agents/skills/robot-multi-agent-rd/SKILL.md)), tích hợp hiển thị trên MuJoCo Studio ([studio/](file:///d:/latuan/Programming/robot-demo/studio/sim_plugin.py)), và bộ kiểm thử tự động ([tests/test_hybrid_brain.py](file:///d:/latuan/Programming/robot-demo/tests/test_hybrid_brain.py)).
 
 ---
 
@@ -15,7 +16,7 @@ Dự án hiện có hai chế độ điều khiển đại diện cho hai thái 
    - **Trôi số học khi tính nhẩm tọa độ bằng chữ:** Bắt LLM tự nhẩm `hypot(odom_x - nx, odom_y - ny) <= 0.40` và tự đổi hướng tương đối/tuyệt đối trong văn bản gây nhầm nút giao (`redundant_revisit_count = 10..13`), dù phản xạ vật lý an toàn tuyệt đối (`contact_count = 0`).
 
 **Mục đích của Mode C (`hybrid-brain`):** Đo lường **năng lực điều khiển robot thực chất của AI Agent** trong vòng lặp thời gian thực (`Sense → Think → Act`) thông qua kiến trúc **System 1 / System 2** sát với robot tự hành ngoài đời:
-- **System 1 (Python 20 Hz — Tay chân & Định vị đo đạc):** Đảm nhận điều khiển chuyển động gộp (`xoay khóa trục + tiến`), tự lướt qua các khúc cua bắt buộc **chỉ có 1 lối đi duy nhất**, và ghi nhận khách quan **Đồ thị Odometry Topo** của những nơi xe *đã thực sự đặt bánh tới* (tương tự module SLAM/Odometry trên mạch nhúng).
+- **System 1 (Python 20 Hz — Tay chân & Định vị đo đạc):** Đảm nhận điều khiển chuyển động gộp (`xoay khóa trục + tiến`), tự lướt qua các khúc cua hành lang bắt buộc **chỉ có 1 lối đi duy nhất**, và ghi nhận khách quan **Đồ thị Odometry Topo** hai chiều của những nơi xe *đã thực sự đặt bánh tới* (tương tự module SLAM/Odometry trên mạch nhúng).
 - **System 2 (AI Agent — Bộ não chiến thuật bị chấm điểm):** Chịu trách nhiệm **100% mọi quyết định có lựa chọn**: chọn nhánh tại mọi ngã 3/ngã 4, suy luận cây ngõ cụt để lùi về nút tổ tiên, phát hiện & thoát vòng lặp đảo chữ U (`maze_c`), nhìn ảnh `front_cam` chọn đường lách vật cản tĩnh (`2wheel`), canh nhịp vượt từng làn/cổng động (`dynamic_a`, `dynamic_b`) và chốt cập đích (`dock`).
 
 ---
@@ -23,12 +24,12 @@ Dự án hiện có hai chế độ điều khiển đại diện cho hai thái 
 ## 2. Mục tiêu, Phi mục tiêu & Phản mục tiêu
 
 ### Mục tiêu (Goals)
-1. Xây dựng **Mode C (`hybrid-brain`)** gồm lệnh gộp `go`, bộ định vị khách quan `TopologicalOdometer` (`topo`), và subagent **`robot-driver-hybrid`** giải quyết trọn vẹn **cả 6 sa bàn chuẩn** (`2wheel`, `maze_a`, `maze_b`, `maze_c`, `dynamic_a`, `dynamic_b`) trên cả `sim_server.py` lẫn **MuJoCo Studio** (`studio/`).
+1. Xây dựng **Mode C (`hybrid-brain`)** gồm lệnh gộp `go`, bộ định vị khách quan `TopologicalOdometer` (`topo`), và subagent **`robot-driver-hybrid`** giải quyết trọn vẹn **cả 6 sa bàn chuẩn** (`2wheel`, `maze_a`, `maze_b`, `maze_c`, `dynamic_a`, `dynamic_b`) trên cả [sim_server.py](file:///d:/latuan/Programming/robot-demo/sim_server.py) lẫn **MuJoCo Studio** ([studio/](file:///d:/latuan/Programming/robot-demo/studio/sim_plugin.py)).
 2. Giảm mạnh số lượt dừng chờ LLM trên mê cung (từ `~30` lượt ở Mode B xuống `~4–10` lượt quyết định thực chất trên `maze_a`), đưa `redundant_revisit_count` về `0` và giữ `contact_count == 0`, `near_collision_count == 0`.
 3. **Bảo toàn 100%** Mode A (`auto-skill`), Mode B (`agent-brain`) và toàn bộ 106 bài kiểm thử hiện có để làm bộ đối chuẩn 3 chế độ (`Mode A` vs `Mode B` vs `Mode C`).
 
 ### Phi mục tiêu (Non-Goals)
-- Không chỉnh sửa phần cứng `models/robot_2wheel.xml` hay bất kỳ địa hình nào trong `models/arena_*.xml`.
+- Không chỉnh sửa phần cứng [models/robot_2wheel.xml](file:///d:/latuan/Programming/robot-demo/models/robot_2wheel.xml) hay bất kỳ địa hình nào trong `models/arena_*.xml`.
 - Không thay thế hay xóa bỏ Mode A hoặc Mode B.
 - Không nhúng bộ lập lịch tìm đường (BFS/Dijkstra/A*/DFS tự động) vào Python.
 
@@ -43,26 +44,32 @@ Dự án hiện có hai chế độ điều khiển đại diện cho hai thái 
 
 | Hạng mục | System 1 (Python 20 Hz — Cơ học & Đo đạc) | System 2 (`robot-driver-hybrid` — Trí khôn bị chấm điểm) |
 | :--- | :--- | :--- |
-| **Chuyển động cơ bản** | Xoay khóa góc chính xác bằng Gyro + chạy giữ tâm hành lang (`go`). | Quyết định hướng tuyệt đối (`E/N/W/S`) hoặc góc xoay cần đi. |
-| **Khúc cua 1 lối đi (Góc chữ L)** | Tự xoay 90° và chạy tiếp nếu chỉ có **đúng 1 hướng mở**, không thấy đích, không có vật cản. | Không phải dừng chờ vô ích ở đoạn ống cong không có ngã rẽ. |
+| **Chuyển động cơ bản** | Xoay khóa góc chính xác bằng Gyro + chạy giữ tâm hành lang (`go`). | Quyết định hướng hệ quy chiếu khởi hành (`E/N/W/S`) hoặc góc xoay cần đi. |
+| **Khúc cua 1 lối đi (Góc chữ L)** | Tự xoay 90° và chạy tiếp nếu đang ở hành lang chỉ có **đúng 1 hướng rẽ ngang**, không thấy đích, không có vật cản. | Không phải dừng chờ vô ích ở đoạn ống cong không có ngã rẽ. |
 | **Ngã giao `>= 2` nhánh mở** | Phanh dừng êm giữa tâm nút, báo danh sách nhánh mở + bản đồ đo đạc. | **Tự chọn nhánh khám phá** dựa trên lịch sử đồ thị & cảm biến. |
-| **Ngõ cụt (`dead_end`)** | Phanh dừng an toàn, ghi nhận thực tế nút hiện tại là `dead_end`. **Không tự quay đầu.** | **Tự suy luận nút cha/ông còn nhánh mở** và phát lệnh `go --cardinal <hướng_thoát>`. |
-| **Vòng lặp (`maze_c`)** | Chỉ báo cờ khách quan `loop_closed = true` khi khớp lại tọa độ `Node #k` cũ từ cạnh mới. | **Tự nhận diện mạch vòng** trên đồ thị và đổi sang nhánh chưa khám phá. |
+| **Ngõ cụt (`dead_end`)** | Phanh dừng an toàn, ghi nhận thực tế nút hiện tại là `dead_end`. **Không tự quay đầu.** | **Tự suy luận nút tổ tiên còn nhánh mở** và phát lệnh `go --cardinal <hướng_thoát>`. |
+| **Vòng lặp (`maze_c`)** | Báo cờ khách quan `loop_closed = true` + số lượt đi/về (`out_visits`, `in_visits`) từng đầu cổng. | **Tự nhận diện mạch vòng** và rút lui/đổi nhánh mà không đi lặp cùng chiều cũ. |
 | **Vật cản tĩnh (`2wheel`)** | Phanh dừng trước vật cản, báo `static_obstacle_ahead` + khoảng hở 2 sườn. | Tự xem `flank_clearance_m` / ảnh `front_cam` và điều khiển vòng lách (`turn` + `move` + `scan`/`go`). |
 | **Vật cản động (`dynamic_a/b`)** | Phanh ngoài vùng quét piston, báo `dynamic_gate_ahead`; thực thi vượt **1 cổng** khi được lệnh `cross-gate`. | Tự điều phối trình tự vượt từng cổng một kết hợp rẽ hành lang chữ S. |
 
 ---
 
-## 4. Các Phương án Đã Cân nhắc & Lý do Chọn
+## 4. Các Phương án Đã Cân nhắc & Lý do Chọn (Approaches)
 
+### 4.1. Kiến trúc tổng thể
 1. **Phương án 1 — System 1 / System 2 Phân tầng theo Sự kiện Quyết định (`Mode C: hybrid-brain`) [ĐƯỢC CHỌN]:**
    - *Cơ chế:* Gộp `xoay + tiến + lướt góc chữ L 1 lựa chọn` vào lệnh `go`, kèm sổ cái định vị khách quan `TopologicalOdometer` lưu ở phía client theo phiên chạy; AI Agent trực tiếp quyết định ở mọi nút phân nhánh, ngõ cụt, vật cản và cổng động.
    - *Đánh đổi:* Giữ AI ngồi trực tiếp trong buồng lái thời gian thực để đánh giá đúng năng lực điều khiển, giảm 70–85% độ trễ dừng chờ so với Mode B, loại bỏ lỗi nhẩm tọa độ mà không vi phạm ranh giới công bằng.
 2. **Phương án 2 — Code-as-Policies (LLM sinh kịch bản Python 20 Hz đầu phiên):**
-   - *Cơ chế:* LLM viết một hàm Python điều khiển robot trước lúc chạy rồi để Python thực thi toàn bộ.
    - *Lý do loại:* Kiểm tra năng lực *viết code offline* của LLM chứ không kiểm tra năng lực *điều khiển & phản ứng trực tiếp theo luồng cảm biến sống* của AI Agent; kém linh hoạt trước bất ngờ thị giác giữa đường và đòi hỏi sandbox thực thi code tự sinh.
-3. **Phương án 3 — Chỉ tối ưu đường truyền trên Mode B thuần túy (giữ nguyên dừng ở mọi góc L, không có `TopologicalOdometer`):**
+3. **Phương án 3 — Chỉ tối ưu đường truyền trên Mode B thuần túy (giữ dừng ở mọi góc L, không có `TopologicalOdometer`):**
    - *Lý do loại:* Vẫn bắt xe dừng chờ ở mọi góc chữ L không có lựa chọn và vẫn để LLM tự nhẩm khoảng cách Euclid bằng văn bản, không giải quyết tận gốc hiện tượng trôi nút giao trên mê cung dài (`maze_b`, `maze_c`).
+
+### 4.2. Đo đạc lịch sử cổng tại các nút đồ thị (Đã chốt cùng người dùng)
+1. **Phương án A — Đo đạc hai chiều trung thực (`out_visits` / `in_visits`) + cập nhật cảm biến ngay sau pha xoay tại chỗ [ĐƯỢC CHỌN]:**
+   - *Đánh đổi:* Mỗi cổng đã đi lưu riêng số lần rời nút (`out_visits`) và số lần tiến vào nút (`in_visits`), đồng thời cập nhật tia khoảng cách ngay sau mỗi lệnh xoay tại chỗ (`go` bước 1 / `turn --wait` / `scan`). Vẫn 100% là lịch sử đo đạc bánh xe khách quan, nhưng giúp AI thấy rõ chiều nào chưa từng đi xuôi (`out_visits == 0`) để bảo đảm `redundant_revisit_count == 0` trên vòng lặp `maze_c`, và giải mã sớm góc mù `180°` ở `Node #0` (`maze_b`).
+2. **Phương án B — Giữ 1 số đếm `"visits"` gộp và chỉ cập nhật cuối lệnh `go`:**
+   - *Lý do loại:* Khi khép vòng lặp trên `maze_c`, cả hai nhánh nối vòng đều hiển thị `"visits": 1` như nhau khiến AI dễ đi lặp lại cùng chiều cũ và bị `telemetry.py` phạt `redundant_revisit_count > 0`.
 
 ---
 
@@ -70,56 +77,97 @@ Dự án hiện có hai chế độ điều khiển đại diện cho hai thái 
 
 ### 5.1. Module Định vị Đồ thị Khách quan — `robot_sim/topo.py` (`TopologicalOdometer`)
 
-`[Quyết định kỹ thuật đề xuất]` Đặt sổ cái định vị ở phía công cụ điều khiển robot (`captures/.topo_state.json`, phân tách theo `base_url`) thay vì sửa máy chủ vật lý `sim_server.py`, giúp tương thích tức thì với cả `sim_server.py` lẫn MuJoCo Studio và giữ đúng mô hình phần cứng thật (máy tính nhúng trên xe tự tích hợp SLAM từ luồng cảm biến trả về).
+`[Quyết định đã chốt cùng người dùng]` Đặt sổ cái định vị ở phía công cụ điều khiển robot (`captures/.topo_state.json`, cách ly phiên theo `base_url` chuẩn hóa dưới khóa `sessions[base_url]`) thay vì sửa máy chủ vật lý [sim_server.py](file:///d:/latuan/Programming/robot-demo/sim_server.py), tương thích tức thì với cả `sim_server.py` lẫn MuJoCo Studio và giữ đúng mô hình máy tính nhúng trên xe tự tích hợp Odometry từ cảm biến.
 
-1. **Nguồn dữ liệu đầu vào hợp lệ duy nhất (100% Sim-to-Real):**
+1. **Nguồn dữ liệu đầu vào & Hệ quy chiếu khởi hành (100% Sim-to-Real):**
    - Chỉ đọc từ `status["sensors"]`: `odom_x_m`, `odom_y_m`, `odom_dist_m`, `gyro_yaw_deg`, `rangefinders_m` và `sim_time`. Tuyệt đối không đọc `debug`.
+   - `[Quyết định kỹ thuật của thiết kế]` Các nhãn hướng `E = 0°`, `N = +90°`, `W = ±180°`, `S = -90°` được định nghĩa hoàn toàn trong **hệ quy chiếu IMU/Odometry tương đối theo lúc khởi hành** (`t = 0`: `odom_x_m = 0`, `odom_y_m = 0`, `gyro_yaw_deg = 0°` hướng dọc trục `+odom_x_m`), không phụ thuộc hướng địa lý thực của bản đồ (ví dụ trên `maze_c` xe xuất phát quay mặt hướng Nam thế giới nhưng IMU khởi tạo `0°`, hệ quy chiếu nội tại vẫn nhất quán tuyệt đối giữa `gyro_yaw_deg`, `odom_x_m/odom_y_m` và `E/N/W/S`).
+   - Quy đổi lượng tử hóa góc sang 4 hướng chính: `idx = int(((yaw_deg + 45.0) % 360.0) // 90.0)` ứng với `{0: "E", 1: "N", 2: "W", 3: "S"}`. Chỉ ánh xạ tia cảm biến (`left90`, `center`, `right90`) vào cổng `E/N/W/S` của một nút mê cung khi xe đang căn thẳng trong phạm vi `<= 15.0°` so với trục `90°` gần nhất (tránh gán nhầm hướng khi xe xoay chéo né vật cản trên sân mở).
+
 2. **Tự động xóa sạch khi sang lượt chạy mới (`Auto-Reset Detection`):**
-   - Tự động khởi tạo lại đồ thị rỗng với `Node #0 (0.0, 0.0)` bất cứ khi nào:
-     - Người dùng / Main Agent gọi `robot_ctl.py reset`, `robot_ctl.py reload`, hoặc `robot_ctl.py topo reset`; **hoặc**
-     - Phát hiện `sim_time` giảm (`cur_sim_time < last_sim_time - 1e-3`), `odom_dist_m` giảm (`cur_odom_dist_m < last_odom_dist_m - 1e-3`), hoặc xe vừa xuất phát lại tại gốc (`cur_odom_dist_m < 0.03` trong khi `last_odom_dist_m > 0.15`).
-3. **Cấu trúc Nút (`Node`) & Cạnh hai đầu cổng (`Port-Accurate Edge`):**
-   - `[Quyết định kỹ thuật đề xuất]` Hợp nhất vị trí dừng hiện tại `(odom_x_m, odom_y_m)` vào `Node #k` đã biết nếu khoảng cách Euclid `<= 0.42 m` (giữ cố định tọa độ neo ban đầu của `Node #k` để tránh trôi tích lũy); nếu lớn hơn, tạo `Node #N` mới.
-   - ** Xử lý chính xác hành lang gấp khúc chữ L/U:** Khi một hành lang có lướt qua góc chữ L (ví dụ rời `Node #1` theo hướng Đông **`E`**, ôm góc chữ L sang Bắc, rồi tiến vào `Node #2` theo hướng Bắc nên hướng nhìn ngược lại tại `Node #2` là Nam **`S`**), hai đầu của cùng một hành lang có hướng cửa khác nhau (`E` ở `Node #1`, nhưng `S` ở `Node #2`). Do đó, mỗi cạnh đã đi được lưu chính xác theo **cổng thực tế tại từng đầu nút**:
-     - Trên `Node #1`: cổng `"E"` ghi `{"state": "explored", "to_node": 2, "visits": 1, "dist_m": 1.62}`.
-     - Trên `Node #2`: cổng `"S"` ghi `{"state": "explored", "to_node": 1, "visits": 1, "dist_m": 1.62}`.
-     - Nhờ vậy, khi AI muốn đi ngược từ `Node #2` về `Node #1`, AI nhìn cổng `"S"` trên `Node #2` và gọi `go --cardinal S` là System 1 tự lướt ngược qua góc chữ L về đúng `Node #1` mà không bao giờ lệch hướng!
-4. **Ghi nhận trung thực điểm mù `180°` phía sau lúc khởi hành (`Rear Blind-Spot Honesty`):**
-   - `[Quyết định kỹ thuật đề xuất]` Phần cứng `models/robot_2wheel.xml` chỉ có tia khoảng cách ở `0°, ±30°, ±90°, ±120°` (không có cảm biến đuôi `180°`). Tại `t = 0` ở `Node #0` (`kind = "start"`), nếu không gian xung quanh là hành lang hẹp, hướng `180°` ngay sau lưng xe thực tế **chưa được bất kỳ cảm biến nào nhìn thấy** (ví dụ trên `maze_b`, lối duy nhất tới đích nằm đúng hướng Tây `180°` sau lưng điểm xuất phát `(0, 0)`).
-   - Thay vì bỏ trống hướng sau lưng (vốn ngầm khẳng định sai rằng phía sau có tường kín), `Node #0` ghi nhận cổng sau lưng với trạng thái trung thực `"state": "uninspected"`. Ngay khi xe xoay mặt hoặc đi lùi/quay về `Node #0` khiến hướng đó lọt vào vùng quét `0° / ±90°` của laser, cổng đó lập tức được phân giải thành `"open"` (nếu thông thoáng) hoặc bị xóa khỏi `exits` (nếu là tường chắn).
-5. **Dữ liệu JSON `topo` xuất cho AI Agent (thuần quan sát, không gợi ý đường):**
-   - `current_node`: mã số nút hiện tại (`int`, hoặc `null` nếu xe đang dừng tạm lưng chừng do chạm `max_dist` hoặc tránh vật cản trên sân mở — không sinh nút giả giữa hành lang thẳng).
-   - `heading_cardinal`: hướng 90° gần nhất hiện tại (`"E" | "N" | "W" | "S"`) kèm `gyro_yaw_deg`.
-   - `loop_closed`: `true` nếu bước di chuyển vừa rồi nối vào một `Node` cũ đã tồn tại từ một cổng trước đó còn `"open"` hoặc `"uninspected"` (báo hiệu khách quan vừa khép một vòng lặp).
-   - `nodes`: danh sách gọn các nút đã biết, mỗi nút gồm `id`, `xy`, `kind` (`"start" | "junction" | "dead_end" | "open_space"`), và từ điển `exits` theo các hướng `E/N/W/S` hiện diện tại nút đó (`state`: `"open"` nếu cảm biến thấy thông thoáng nhưng xe chưa đi vào, `"uninspected"` cho góc mù `180°` sau lưng `Node #0` khi chưa quét tới, hoặc `"explored"` kèm `to_node`, `visits`, `dist_m` nếu xe đã đi qua).
-   - **Không có trường `parent`, không tự đánh dấu nhánh của nút cha là `dead_end`, không có `suggested_exit`.** AI Agent phải tự đọc `nodes` để suy luận nhánh nào dẫn tới nút cụt hoặc nhánh nào còn `"open"` / `"uninspected"` sâu bên trong.
+   - Khởi tạo lại phiên đồ thị mới bất cứ khi nào:
+     - Gọi `robot_ctl.py reset`, `robot_ctl.py reload`, hoặc `robot_ctl.py topo reset`; **hoặc**
+     - Phát hiện `cur_sim_time < last_sim_time - 1e-3`, hoặc `cur_odom_dist_m < last_odom_dist_m - 1e-3`; **hoặc**
+     - Xe quay về đúng gốc xuất phát sau khi đã vận hành (`abs(cur_odom_dist_m) < 0.03` và `hypot(cur_odom_x, cur_odom_y) < 0.03` trong khi `last_odom_dist_m > 0.10`, hoặc `abs(cur_odom_dist_m) < 1e-3` và `abs(cur_gyro_yaw) < 0.5` trong khi trước đó `abs(last_odom_dist_m) > 1e-3` hoặc `abs(last_gyro_yaw) > 2.0` — bắt được cả trường hợp người dùng bấm `Reset Robot Spawn` trực tiếp trong cửa sổ MuJoCo Studio).
+
+3. **Quy tắc Sinh Nút (`Node`), Nối Mạch Tạm (`pending_leg`) & Cạnh Hai Đầu Cổng (`Port-Accurate Bidirectional Edge`):**
+   - **Nút khởi đầu `Node #0`:** Tự động tạo khi mở phiên (`topo show` hoặc đầu lệnh `go`):
+     - Nếu `left90 > 0.75`, `right90 > 0.75` và `center > 0.85` -> `kind = "open_space"` (`2wheel`, `dynamic_a`); ngược lại -> `kind = "start"`.
+   - **Khớp nút hiện có (`<= 0.42 m`):** Mọi điểm dừng cách tâm một `Node #k` đã biết khoảng cách Euclid `<= 0.42 m` đều gán `current_node = k` và giữ cố định tọa độ neo ban đầu `xy` của `Node #k` để chống trôi tích lũy.
+   - **Khi nào tạo `Node #N` mới vs giữ `current_node = null` (Đã chốt cùng người dùng):**
+     - Chỉ tạo `Node #N` mới (`> 0.42 m` so với mọi nút cũ) khi sự kiện dừng là `junction` hoặc `dead_end` trong không gian hành lang/tường chắn (`kind = "dead_end"` nếu `event == "dead_end"`, ngược lại `"junction"`).
+     - Nếu dừng giữa chừng vì `dynamic_gate_ahead`, `static_obstacle_ahead`, `target_ready` hoặc `max_dist` (và cách mọi `Node` cũ `> 0.42 m`), **không tạo nút giả**: đặt `current_node = null`.
+   - **Nối mạch hành trình `pending_leg` qua cổng động / điểm dừng lửng (Đã chốt cùng người dùng):**
+     - Khi rời `Node #u` trong lệnh `go` (ghi nhận **sau** bước xoay khóa hướng đầu lệnh để lấy đúng cổng xuất phát `depart_port`), lưu `pending_leg = {"from_node": u, "depart_port": depart_port, "dist_m": 0.0}`.
+     - Nếu xe dừng lưng chừng (`dynamic_gate_ahead`, `max_dist`) rồi gọi tiếp `cross-gate` và `go`, `pending_leg.dist_m` tiếp tục cộng dồn quãng đường cho tới khi chạm một `Node #v` thực sự (`junction` / `dead_end` hoặc khớp lại `Node` cũ).
+     - Nếu xe thực hiện lách tự do trên sân mở (`move`, `wheels`, hoặc `turn` lệch khỏi lưới `90°` quá `20°` khi `current_node == null`), hủy `pending_leg = null` để không nối nhầm đường vòng sân mở thành hành lang mê cung.
+   - **Cạnh hai đầu cổng với bộ đếm `out_visits` / `in_visits` (Đã chốt cùng người dùng):**
+     - Khi hoàn tất `pending_leg` từ `(Node #u, p_out)` tiến vào `Node #v` theo hướng `arrival_cardinal` (nên hướng nhìn ngược lại từ `Node #v` vào hành lang đó là `p_in = opposite(arrival_cardinal)`):
+       - Trên `Node #u`, cổng `p_out` cập nhật: `{"state": "explored", "to_node": v, "out_visits": prev_out + 1, "in_visits": prev_in, "dist_m": d}`.
+       - Trên `Node #v`, cổng `p_in` cập nhật: `{"state": "explored", "to_node": u, "out_visits": prev_out_v, "in_visits": prev_in_v + 1, "dist_m": d}`.
+       - Nhờ lưu đúng hướng cửa ở từng đầu nút (`p_out` ở `#u`, `p_in` ở `#v`), hành lang gấp khúc chữ L/U được đi xuôi và đi ngược chính xác 100% chỉ bằng `go --cardinal <cổng>`.
+     - **Cờ khách quan `loop_closed`:** Chỉ bật `loop_closed = true` khi `Node #v` đã tồn tại từ trước (`v != u` hoặc `d >= 0.80 m`) **và** cạnh `(u:p_out <-> v:p_in)` trước đó chưa được ghi nhận `"explored"` nối với nhau (tức vừa khép một dây cung vòng lặp mới; đi lùi bình thường trên cạnh đã `"explored"` thì `loop_closed = false`).
+
+4. **Điểm mù `180°` lúc khởi hành & Phân giải tức thì khi xoay tại chỗ (Đã chốt cùng người dùng):**
+   - Phần cứng [models/robot_2wheel.xml](file:///d:/latuan/Programming/robot-demo/models/robot_2wheel.xml) chỉ có tia khoảng cách ở `0°, ±30°, ±90°, ±120°` (không có cảm biến đuôi `180°`). Tại `t = 0` ở `Node #0` (`kind == "start"`), cổng `180°` ngay sau lưng xe được ghi nhận trung thực là `"state": "uninspected"`.
+   - Bất cứ khi nào xe đứng tại một `Node #k` (`<= 0.42 m`) và hoàn tất pha xoay tại chỗ (`go` bước 1 `closed_loop_turn`, `turn --wait`, `scan`, hoặc `topo show`) với góc lệch `<= 15°` so với trục `90°`, `TopologicalOdometer` đối chiếu ngay 3 hướng trước/trái/phải vừa lọt vào vùng quét laser:
+     - Cổng đang `"uninspected"` nếu thông thoáng (`in open_cardinals`) -> nâng lên `"state": "open"`; nếu bị tường chắn -> xóa khỏi `exits`.
+     - Cổng thông thoáng mới phát hiện (chưa có trong `exits` và `kind != "open_space"`) -> thêm `"state": "open"`.
+     - Cổng đã `"explored"` giữ nguyên lịch sử.
+
+5. **Schema JSON `topo` xuất cho AI Agent (thuần quan sát, không gợi ý đường):**
+   ```json
+   {
+     "current_node": 1,
+     "heading_cardinal": "N",
+     "gyro_yaw_deg": 90.12,
+     "odom_xy": [0.98, 0.02],
+     "loop_closed": false,
+     "pending_from_node": null,
+     "nodes": [
+       {
+         "id": 0,
+         "xy": [0.0, 0.0],
+         "kind": "start",
+         "exits": {
+           "E": {"state": "explored", "to_node": 1, "out_visits": 1, "in_visits": 0, "dist_m": 1.94},
+           "N": {"state": "open", "to_node": null, "out_visits": 0, "in_visits": 0, "dist_m": null},
+           "W": {"state": "uninspected", "to_node": null, "out_visits": 0, "in_visits": 0, "dist_m": null}
+         }
+       }
+     ]
+   }
+   ```
+   *(Tuyệt đối không có `parent`, không tự đánh dấu nhánh cụt hộ AI, không có `suggested_exit`.)*
 
 ---
 
 ### 5.2. Kỹ năng Vận động Gộp System 1 — `go_to_decision` (`robot_ctl.py go`)
 
-Thêm hàm `go_to_decision` vào [robot_sim/skills.py](file:///c:/Users/latuan/Programming/robot-demo/robot_sim/skills.py) và lệnh CLI `.venv\Scripts\python.exe robot_ctl.py go`:
+Thêm hàm `go_to_decision` vào [robot_sim/skills.py](file:///d:/latuan/Programming/robot-demo/robot_sim/skills.py) và lệnh CLI `.venv\Scripts\python.exe robot_ctl.py go`:
 
 ```powershell
-.venv\Scripts\python.exe robot_ctl.py go [--cardinal E|N|W|S | --heading-deg <DEG>] [--max-dist 6.0] [--speed 0.55] [--max-chain 6] [--no-chain]
+.venv\Scripts\python.exe robot_ctl.py go [--cardinal E|N|W|S | --heading-deg <DEG>] [--max-dist 6.0] [--speed 0.55] [--step-dt 0.10] [--max-chain 6] [--no-chain]
 ```
 
-1. **Bước 1 — Xoay khóa hướng đầu lệnh (nếu có `--cardinal` hoặc `--heading-deg`):**
-   - Quy đổi `E = 0°`, `N = +90°`, `W = 180°`, `S = -90°`.
-   - Tính góc bù chính xác `turn_deg = wrap180(target_deg - gyro_yaw_deg)`. Nếu `abs(turn_deg) > 3.0°`, gọi `closed_loop_turn` để khóa thẳng trục trước khi lăn bánh (nếu `<= 3.0°`, bỏ qua bước xoay để tiết kiệm thời gian, để bộ giữ hướng của `advance_segment` tự chỉnh mượt).
-2. **Bước 2 — Chạy phản xạ 20 Hz & Lướt góc chữ L 1 lựa chọn (`Auto-Chain`):**
-   - `[Quyết định kỹ thuật đề xuất]` **Phân bổ ngân sách quãng đường (`--max-dist 6.0` tổng hành trình lệnh `go`):**
-     - Trong hành lang có tường hai bên, mỗi chặng `advance_segment` con được cấp `seg_max = min(3.5, remaining_dist)` (đủ đi trọn một mạch các hành lang thẳng dài `2.0–2.3 m` trên `maze_a` và `maze_c` mà không bị ngắt lửng lơ giữa hành lang; đồng thời tổng hành trình `6.0 m` với `max_chain = 6` đủ đi trọn nhánh ống cụt gấp khúc `4.4 m` trên `maze_b` chỉ trong 1 lệnh `go`).
-     - Ở sân mở không có tường hai bên (`left90 > 0.75` và `right90 > 0.75`), giới hạn một chặng tiến đơn lẻ ở `min(1.8, remaining_dist)` để xe dừng kiểm tra an toàn định kỳ.
-     - Nếu dừng vì chạm ngưỡng `max_dist` lưng chừng hành lang (ví dụ người gọi chủ động truyền `--max-dist` nhỏ), `TopologicalOdometer` chỉ cập nhật quãng đường tạm thời (`current_node = null`) chứ không sinh nút giao ảo giữa ống thẳng.
-   - `[Quyết định kỹ thuật đề xuất]` **Điều kiện duy nhất được phép lướt tiếp góc chữ L (`auto-chain`)** mà không dừng hỏi AI (tối đa `max_chain = 6` đoạn và tổng quãng đường `<= max_dist`):
+1. **Bước 1 — Quan sát nút hiện tại & Xoay khóa hướng đầu lệnh:**
+   - Đọc `/status?vision=1`, đồng bộ `topo.observe_status(st)` (đảm bảo `Node #0` được ghi nhận trước mọi chuyển động).
+   - Nếu có `--cardinal` (`E=0°, N=+90°, W=180°, S=-90°`) hoặc `--heading-deg`: tính `turn_deg = wrap180(target_deg - gyro_yaw_deg)`. Nếu `abs(turn_deg) > 3.0°`, gọi `closed_loop_turn(..., fast_settle=True, include_vision=True)` rồi gọi lại `topo.observe_status(post_turn_st)` để phân giải ngay mọi góc mù vừa quét qua tại nút đứng.
+   - Bắt đầu ghi nhận `topo.begin_leg(cur_st)` nếu đang đứng tại một `Node`.
+
+2. **Bước 2 — Chạy phản xạ 20 Hz & Lướt góc chữ L 1 lựa chọn (`Auto-Chain`) (Đã chốt cùng người dùng):**
+   - **Ngân sách quãng đường từng chặng (`seg_max`):**
+     - Mặc định cấp `seg_max = min(3.5, remaining_dist)` kể cả khi xe xuất phát từ giữa tâm ngã 3/ngã 4 mở hai bên (`left90 > 0.75` và `right90 > 0.75`), giúp đi trọn các hành lang thẳng dài `2.0–3.2 m` (`maze_a`, `maze_c`) không bị cắt lửng lơ.
+     - Chỉ hạ `seg_max = min(1.8, remaining_dist)` khi không gian xung quanh thực sự là sân trống rộng (`min(left90, right90, left120, right120) > 1.35 m` hoặc `Node #0.kind == "open_space"` và hai bên trống `> 0.85 m`) để kiểm tra định kỳ an toàn cánh bên.
+   - **5 điều kiện bắt buộc để tự động lướt góc chữ L (`auto-chain`)** (khi `auto_chain == True`, số đoạn đã nối `< max_chain`, quãng đường còn lại `> 0.15 m`, và ở đoạn nối thứ 2 trở đi phải đi được `moved_m >= 0.20 m` để chống lặp tại chỗ):
      1. `advance_segment` vừa dừng với `event == "junction"`.
-     2. Vị trí dừng hiện tại **không trùng khớp (`> 0.42 m`) với bất kỳ `Node` nào đã đăng ký trong `TopologicalOdometer`** (bảo đảm khi xe quay về lại một nút cũ như `Node #0` trên `maze_b`, xe bắt buộc dừng ngay tại nút đó, cập nhật các cổng vừa lọt vào tầm nhìn cảm biến và trả quyền cho AI thay vì tự lướt xuyên qua nút gốc).
-     3. `open_branches` chỉ có **đúng 1 hướng duy nhất** và hướng đó là rẽ ngang: `open_branches == ["left"]` hoặc `open_branches == ["right"]` (tức phía trước bị tường chặn, một bên bị tường chặn, chỉ còn đúng 1 ngả rẽ vuông góc bắt buộc).
-     4. Không thấy trụ đích (`after_status.vision.target_visible == false`) và không thấy bất kỳ vật cản màu nào trong khung hình (`after_status.vision.obstacles == []`).
-     5. Không gian đầu và cuối đoạn đều là hành lang có vách (không tự bẻ lái liên hoàn trên sân mở).
-   - Khi thỏa đủ 5 điều kiện trên: System 1 xoay khóa `±90°` theo hướng mở duy nhất đó (dùng công thức khóa bội số `90°` chống trôi góc tích lũy), ghi nhận `auto_turns_count += 1`, rồi gọi tiếp `advance_segment` cho đoạn kế tiếp.
-   - Ngay khi chạm bất kỳ **Điểm Quyết định Thực sự** nào — khớp lại một `Node` đã biết, ngã giao có `>= 2` nhánh mở (VD `["left", "straight"]`, `["left", "right"]`, `["left", "straight", "right"]`), `dead_end`, `dynamic_gate_ahead`, `static_obstacle_ahead`, `target_ready`, hoặc hết hạn mức `max_dist`/`max_chain` — System 1 phanh dừng êm, cập nhật `TopologicalOdometer` và trả quyền về ngay cho System 2 (AI Agent).
+     2. Vị trí dừng hiện tại **cách mọi `Node` đã đăng ký trong `TopologicalOdometer` trên `0.42 m`** (đảm bảo khi xe lùi/vòng về lại một nút đã biết như `Node #0` trên `maze_b` hoặc khép vòng trên `maze_c`, xe bắt buộc dừng ngay tại nút đó và trả quyền cho AI).
+     3. `open_branches` chỉ có **đúng 1 hướng rẽ ngang duy nhất**: `open_branches == ["left"]` hoặc `open_branches == ["right"]` (phía trước bị tường chặn, sườn đối diện bị tường chặn).
+     4. Không thấy trụ đích (`vision.target_visible == false`) và không thấy bất kỳ vật cản màu nào trong khung hình (`vision.obstacles == []`).
+     5. **Xác nhận ngữ cảnh hành lang (không xét cứng lúc mới xuất phát):** Trong quá trình chạy chặng vừa rồi cảm biến sườn đã ghi nhận vách hành lang (`min(left90, right90) <= 0.60 m` ở ít nhất một mẫu trên đường đi), **hoặc** tại điểm dừng góc cua sườn bị chặn có `rf_90 <= 0.55 m` kèm `min(left120, right120) < 1.35 m` (loại trừ trường hợp xe đâm chéo sát góc tường bao sân mở `4m x 4m`).
+   - Khi thỏa đủ 5 điều kiện: khóa góc vuông `90°` kế tiếp `next_yaw = round((cur_yaw + (±90.0)) / 90.0) * 90.0`, xoay bằng `closed_loop_turn(..., fast_settle=True)`, ghi `"left"` / `"right"` vào `auto_l_turns`, và chạy tiếp chặng `advance_segment` kế tiếp.
+   - Khi dừng tại bất kỳ **Điểm Quyết định Thực sự** nào (ngã giao `>= 2` nhánh, khớp `Node` cũ, `dead_end`, `dynamic_gate_ahead`, `static_obstacle_ahead`, `target_ready`, hoặc chạm `max_dist`/`max_chain`), dừng êm, cập nhật `TopologicalOdometer.finish_go(...)` và trả JSON về cho System 2.
+
 3. **Định dạng JSON trả về của `go` (luôn lọc sạch `debug`):**
    ```json
    {
@@ -135,51 +183,56 @@ Thêm hàm `go_to_decision` vào [robot_sim/skills.py](file:///c:/Users/latuan/P
      "after_status": { ... }
    }
    ```
-   *(Cung cấp sẵn `open_cardinals` quy đổi từ `open_branches` + `gyro_yaw_deg` hiện tại bằng toán học chính xác để AI không bao giờ nhầm Trái/Phải khi xe đang quay mặt về hướng Nam/Tây.)*
 
-4. **Lệnh phụ trợ đọc/xóa bản đồ đo đạc (`robot_ctl.py topo`):**
-   - `robot_ctl.py topo show` — đọc trạng thái cảm biến hiện tại + xuất bản đồ `topo` (cập nhật nút khởi đầu nếu chưa có).
-   - `robot_ctl.py topo reset` — xóa file `.topo_state.json` (dùng trong kiểm thử hoặc khi muốn xóa sổ cái thủ công).
-   - Ngoài ra, khi gọi `cross-gate` hoặc `dock` thành công, `robot_ctl.py` cũng đồng bộ vị trí dừng mới vào `TopologicalOdometer` nếu đang có phiên `topo` hoạt động để đồ thị không bị đứt quãng trên `dynamic_b` (hành lang chữ S có cổng piston).
+4. **Lệnh `robot_ctl.py topo` & Đồng bộ CLI (`cross-gate`, `dock`, `turn`, `move`, `scan`, `reset`, `reload`):**
+   - `robot_ctl.py topo show`: đọc `/status?vision=1`, khởi tạo/cập nhật `TopologicalOdometer` cho `--url`, trả `{ "topo": ..., "open_branches": ..., "open_cardinals": ..., "after_status": ... }` (lọc sạch `debug`).
+   - `robot_ctl.py topo reset`: xóa phiên `topo` của `--url` trong `captures/.topo_state.json`.
+   - `[Đã chốt cùng người dùng]` Ở tầng CLI [robot_ctl.py](file:///d:/latuan/Programming/robot-demo/robot_ctl.py) (giữ nguyên chữ ký và giá trị trả về của các hàm lõi Mode A/B trong `skills.py`):
+     - `cross-gate`: bổ sung trường `"open_cardinals"` vào JSON đầu ra CLI, và nếu đang có phiên `topo` hoạt động cho `--url` thì cộng dồn `moved_m` vào `pending_leg` + đính kèm `"topo"`.
+     - `turn --wait`, `scan`, `dock`: nếu đang có phiên `topo` hoạt động cho `--url`, đồng bộ trạng thái cảm biến cuối lệnh vào `TopologicalOdometer` (xóa phiên khi gọi `reset` / `reload`, và hủy `pending_leg` nếu gọi `move` / `wheels` tự do ngoài nút). Mode A và Mode B không gọi `go` / `topo show` nên không tạo file `.topo_state.json`.
 
 ---
 
 ### 5.3. Subagent `robot-driver-hybrid` & Quy trình Đa Tác Tử Mode C
 
-1. **Thêm tệp `.agents/skills/robot-multi-agent-rd/references/driver-hybrid-prompt.md`:**
-   - **Bộ công cụ được phép dùng:** `status --vision`, `topo show`, `go`, `cross-gate`, `dock`, `turn`, `move`, `scan --no-recover-occlusion`, `camera --name front_cam`, `stop`.
-   - **Cấm tuyệt đối:** `--debug`, `arenas`, `reset`, `reload`, `demo`, `telemetry`, `explore`, `approach`, `overview_cam`, và cấm đọc mã nguồn dự án.
-   - **Chiến thuật tư duy của System 2 (AI Agent):**
-     - **Khởi động:** Gọi `status --vision` (hoặc `topo show`). Nếu ở sân mở chưa thấy đích, gọi `scan --max-degrees 360 --direction left --no-recover-occlusion`; nếu ở hành lang hoặc đã thấy hướng đi, gọi `go`.
-     - **Duyệt đồ thị & Thoát ngõ cụt / vòng lặp (`maze_a`, `maze_b`, `maze_c`):** Đọc trực tiếp `topo.nodes` và `open_cardinals` từ kết quả `go`:
-       - Tại nút có cổng `"open"`: chọn một cổng `"open"` và gọi `go --cardinal <C>`. (Nếu tại nút hiện tại chỉ còn cổng `"uninspected"` ở `Node #0`, gọi `turn 180 --wait --vision` hoặc `go --cardinal <C>` để kiểm tra và đi vào hướng sau lưng đó.)
-       - Tại `dead_end` hoặc nút mà mọi cổng đều dẫn sang các vùng đã cạn sạch `"open"` / `"uninspected"` (do chính AI kiểm tra trên `topo.nodes`): tìm đường ngắn nhất trên các cạnh `"explored"` của `topo.nodes` về nút gần nhất còn cổng `"open"` hoặc `"uninspected"`, rồi đi từng bước `go --cardinal <cổng_nối>` để quay về đó — bảo đảm **`redundant_revisit_count == 0`**, kể cả khi điểm xuất phát có nhánh sau lưng trên `maze_b` hoặc đảo vòng lặp chữ U trên `maze_c` (`loop_closed == true`).
-     - **Lách vật cản tĩnh (`2wheel`):** Khi `go` báo `static_obstacle_ahead`, đọc `flank_clearance_m` (và chụp `camera --name front_cam` nếu cần xem bố cục), chủ động lách qua sườn thoáng bằng `turn ±65 --wait --vision` → `move 0.55 --speed 0.35 --wait --vision` → `scan --max-degrees 180 --no-recover-occlusion` → `go` / `dock`.
-     - **Vượt làn & cổng động (`dynamic_a`, `dynamic_b`):** Khi `go` báo `dynamic_gate_ahead`, gọi `cross-gate --timeout 12.0` để vượt qua 1 cổng, sau đó gọi tiếp `go` (nếu ở góc cua sau cổng không có hướng đi thẳng thì chọn hướng trong `open_cardinals` truyền vào `go --cardinal <C>`).
-     - **Cập đích (`target_ready`):** Gọi `dock --stop-distance 0.25` và kiểm tra đủ 3 điều kiện dừng chuẩn trước khi kết thúc.
+1. **Tạo tệp `.agents/skills/robot-multi-agent-rd/references/driver-hybrid-prompt.md`:**
+   - **Bộ công cụ được phép dùng:** `topo show`, `status --vision`, `go`, `cross-gate`, `dock`, `turn`, `move`, `scan --no-recover-occlusion`, `camera --name front_cam`, `stop`.
+   - **Cấm tuyệt đối:** `--debug`, `arenas`, `topo reset`, `reset`, `reload`, `demo`, `telemetry`, `explore`, `approach`, `overview_cam`, và cấm đọc mã nguồn dự án hay `captures/`.
+   - **Chiến thuật tư duy của System 2 (`robot-driver-hybrid`):**
+     - **Khởi động:** Gọi `topo show` (nhận đồng thời `after_status` kèm `vision`, `open_cardinals` và `Node #0`). Nếu `Node #0.kind == "open_space"` và chưa thấy đích, gọi `scan --max-degrees 360 --direction left --no-recover-occlusion` rồi `go`; nếu ở hành lang hoặc đã thấy hướng đi, gọi `go` (hoặc `go --cardinal <C>` theo nhánh mở).
+     - **Duyệt đồ thị mê cung & Chống đi lặp cùng chiều (`maze_a`, `maze_b`, `maze_c`):**
+       - Tại `current_node` có cổng `"state": "open"`: chọn một cổng `"open"` và gọi `go --cardinal <C>`.
+       - Nếu không còn cổng `"open"` nhưng tại `current_node` có cổng `"uninspected"`, gọi `go --cardinal <C>` (bước xoay đầu lệnh sẽ tự kiểm tra hướng đó và chạy tiếp nếu mở, hoặc dừng ngay nếu là tường).
+       - Tại `dead_end` hoặc khi `current_node` hết sạch cổng `"open"` / `"uninspected"` (bao gồm cả khi `loop_closed == true` trên `maze_c`): tìm đường đi ngắn nhất trên `topo.nodes` về nút gần nhất còn cổng `"open"` (ưu tiên `"open"` trước, chỉ xét `"uninspected"` khi toàn đồ thị không còn cổng `"open"` nào), **trong đó chỉ đi qua các cổng `"explored"` có `out_visits == 0`** (tức lùi ngược chiều đã đến, tuyệt đối tránh đi lần 2 theo cùng một chiều `out_visits >= 1` trừ khi không tồn tại đường nào khác) — đảm bảo **`redundant_revisit_count == 0`** trên cả cây ngõ cụt lẫn mạch vòng chữ U.
+     - **Lách vật cản tĩnh (`2wheel`):** Khi `go` báo `static_obstacle_ahead`, đọc `flank_clearance_m` (chỉ chụp `camera --name front_cam` khi cần quan sát bố cục cụm vật cản sân mở), lách qua sườn thoáng bằng `turn ±65 --wait --vision` → `move 0.55 --speed 0.35 --wait --vision` → `scan --max-degrees 180 --no-recover-occlusion` → `go` / `dock`.
+     - **Vượt làn & cổng động (`dynamic_a`, `dynamic_b`):** Khi `go` báo `dynamic_gate_ahead`, gọi `cross-gate --timeout 12.0` để vượt đúng 1 cổng, sau đó đọc `open_cardinals` / `after_status`: nếu đã `target_ready` thì `dock`, nếu còn đường/góc cua chữ S thì gọi tiếp `go` (hoặc `go --cardinal <C>` nếu phía trước bị tường chặn).
+     - **Cập đích (`target_ready`):** Gọi `dock --stop-distance 0.25` và xác nhận `vision.target_visible == true`, `abs(offset_x) < 0.25`, `0.15 <= rf_center <= 0.35`.
 
-2. **Cập nhật `.agents/skills/robot-multi-agent-rd/SKILL.md` & `engineer-prompt.md`:**
-   - Bổ sung **Mode C — `hybrid-brain`** bên cạnh Mode A (mặc định) và Mode B:
+2. **Cập nhật [SKILL.md](file:///d:/latuan/Programming/robot-demo/.agents/skills/robot-multi-agent-rd/SKILL.md) & [engineer-prompt.md](file:///d:/latuan/Programming/robot-demo/.agents/skills/robot-multi-agent-rd/references/engineer-prompt.md):**
+   - Bổ sung **Mode C — `hybrid-brain`** (kích hoạt khi người dùng yêu cầu `hybrid-brain` / `Mode C`, giữ Mode A là mặc định và bảo toàn nguyên vẹn Mode B):
      - Đăng ký subagent `robot-driver-hybrid` từ `references/driver-hybrid-prompt.md`.
-     - Hộp đen chạy nền `--max-duration 360` (tương đương ngưỡng thời gian thực tế như Mode A, nhanh hơn nhiều so với `900s` của Mode B!).
+     - Chạy Hộp đen `telemetry record --hz 10 --max-duration 480`.
      - **Tiêu chí chấm điểm Mode C:**
        - Bắt buộc: `goal_reached == true`, `contact_count == 0`, `near_collision_count == 0`, `error_count == 0`.
-       - Chất lượng bộ não & tốc độ lai: `redundant_revisit_count == 0`, ghi nhận đầy đủ `path_efficiency`, `wall_time_s`, `active_drive_time_s`, `agent_think_time_s`, `command_burst_count` để lập bảng so sánh 3 cột (`Mode A` vs `Mode B` vs `Mode C`).
-     - **Ranh giới sửa chữa của `robot-engineer` trong Mode C:** Được tinh chỉnh `driver-hybrid-prompt.md`, ngưỡng phản xạ an toàn trong `go_to_decision`/`advance_segment`/`cross_dynamic_gate`/`dock_target` và sai số ghép nút trong `topo.py`; **tuyệt đối cấm** sửa `models/*.xml` hoặc đưa thuật toán chọn nhánh/giải mê cung tự động vào `topo.py` hay `go_to_decision`.
+       - Chất lượng tư duy & hiệu năng lai: `redundant_revisit_count == 0`, báo cáo đầy đủ `path_efficiency`, `wall_time_s`, `active_drive_time_s`, `agent_think_time_s`, `command_burst_count` để so sánh trực tiếp `Mode A` vs `Mode B` vs `Mode C`.
+     - **Ranh giới của `robot-engineer` ở Mode C:** Được tinh chỉnh `driver-hybrid-prompt.md`, ngưỡng phản xạ an toàn trong `go_to_decision` và dung sai ghép nút trong `topo.py`; **tuyệt đối cấm** sửa `models/*.xml` hoặc nhúng thuật toán chọn nhánh/tìm đường tự động vào `topo.py` hay `go_to_decision`.
 
 ---
 
 ## 6. Tích hợp Hiển thị trên MuJoCo Studio (`studio/`)
 
-`[Quyết định kỹ thuật đề xuất]` Không cần thay đổi giao thức HTTP (`127.0.0.1:8765`) trong `studio/sim_plugin.py` vì `go` và `topo` hoạt động hoàn toàn qua các endpoint cảm biến/bánh xe hiện có (`/status?vision=1`, `/wheels`, `/stop`, `/camera`). Để việc quan sát trực tiếp trong MuJoCo Studio sinh động hơn, bảng `viewer_plugin.py` có thể hiển thị thêm dòng tóm tắt gọn số `Node` đã mở trong `captures/.topo_state.json` (chỉ đọc hiển thị thụ động nếu file tồn tại, không ảnh hưởng luồng mô phỏng).
+`[Đã chốt cùng người dùng]` Không thay đổi giao thức HTTP (`127.0.0.1:8765`) trong [studio/sim_plugin.py](file:///d:/latuan/Programming/robot-demo/studio/sim_plugin.py). Để hiển thị trực tiếp tiến độ bản đồ Topo trên bảng điều khiển MuJoCo Studio mà **không đọc đĩa 60 FPS trong hàm vẽ UI và không gây lỗi khóa file Windows (`PermissionError / WinError 5`)**:
+- Trong [studio/messages.py](file:///d:/latuan/Programming/robot-demo/studio/messages.py): thêm các trường mặc định nhẹ vào `RobotTelemetry` (`topo_node_count: int = 0`, `topo_current_node: int = -1`, `topo_open_exits: int = 0`).
+- Trong [studio/sim_plugin.py](file:///d:/latuan/Programming/robot-demo/studio/sim_plugin.py): kiểm tra `mtime` của `captures/.topo_state.json` tối đa `2 Hz` (bọc `try/except (OSError, ValueError)` an toàn, đồng thời ghi tệp bên `topo.py` có retry ngắn `3 x 15ms` khi `os.replace` gặp `PermissionError` trên Windows) để cập nhật bộ nhớ đệm gửi qua `RobotTelemetry`.
+- Trong [studio/viewer_plugin.py](file:///d:/latuan/Programming/robot-demo/studio/viewer_plugin.py): khi `t.topo_node_count > 0`, hiển thị thêm 1 dòng trạng thái gọn dưới mục Telemetry (`Topo Graph: N nodes | Current: #k | Open exits: m`).
 
 ---
 
 ## 7. Phần Dành Cho Người Lập Kế Hoạch Thi Công (What's Left to the Builder)
 
-1. Thiết kế chi tiết schema lưu trữ JSON nguyên tử (`.tmp` -> `replace`) cho `robot_sim/topo.py` (`TopologicalOdometer`), xử lý trường hợp xe dừng giữa sân mở (`open_space`, không gộp bừa các điểm lách vật cản thành nút mê cung) so với nút giao hành lang (`junction` / `dead_end`).
-2. Viết hàm `go_to_decision` trong [robot_sim/skills.py](file:///c:/Users/latuan/Programming/robot-demo/robot_sim/skills.py) tái sử dụng tối đa `closed_loop_turn`, `advance_segment` và `compute_open_branches` hiện có mà không phá vỡ chữ ký hay hành vi của Mode A & Mode B.
-3. Xây dựng bộ kiểm thử đơn vị & tích hợp mới `tests/test_hybrid_brain.py`:
-   - Kiểm thử `TopologicalOdometer`: hợp nhất nút `<= 0.42 m`, cạnh hai đầu cổng qua hành lang chữ L/U, cờ `loop_closed` trên mạch vòng, tự động reset khi `sim_time`/`odom_dist_m` quay về 0, và xác nhận không rò rỉ `debug` hay trường gợi ý nhánh.
-   - Kiểm thử `go_to_decision`: xoay khóa hướng đầu lệnh, tự lướt qua góc chữ L 1 lối đi, dừng ngay khi gặp ngã 3 (`>= 2` hướng), dừng ngay khi thấy đích hoặc vật cản màu (`contact_count == 0`), và chạy kịch bản mô phỏng System 2 giải `maze_a`, `maze_c`, `dynamic_b`.
-   - Đảm bảo toàn bộ 106 bài kiểm thử cũ + bộ kiểm thử mới đều PASS 100%.
+1. Chi tiết hóa cấu trúc lớp `TopologicalOdometer` trong `robot_sim/topo.py` (ghi file nguyên tử `.tmp -> replace` kèm retry `PermissionError` trên Windows, hàm tiện ích quy đổi góc/cardinal dùng chung giữa `topo.py`, `skills.py` và `robot_ctl.py`).
+2. Triển khai `go_to_decision` trong [robot_sim/skills.py](file:///d:/latuan/Programming/robot-demo/robot_sim/skills.py) tái sử dụng sạch `closed_loop_turn`, `advance_segment`, `compute_open_branches` mà không làm thay đổi hành vi của Mode A hay Mode B.
+3. Xây dựng bộ kiểm thử tự động `tests/test_hybrid_brain.py` và cập nhật `tests/test_agent_skill.py` / `tests/test_cli.py`:
+   - Kiểm thử `TopologicalOdometer`: hợp nhất nút `<= 0.42 m`, cạnh hai đầu cổng `out_visits`/`in_visits` qua hành lang chữ L/U, nối tiếp `pending_leg` qua cổng động, phân giải `"uninspected"` ngay sau khi xoay tại chỗ, cờ `loop_closed` (chỉ bật cho dây cung mới, không bật khi đi lùi cạnh cũ), tự động reset phiên, và kiểm định không lộ `debug` hay gợi ý nhánh.
+   - Kiểm thử `go_to_decision` & CLI `go`/`topo`: xoay khóa hướng đầu lệnh, xuất phát từ ngã 4 mở đi trọn hành lang dài `> 2.0 m`, tự lướt góc chữ L 1 lối đi, dừng ngay ở ngã giao `>= 2` nhánh hoặc `Node` đã biết, dừng an toàn trước vật cản tĩnh/động và trụ đích (`contact_count == 0`), kèm kịch bản tích hợp headless giải `maze_a`, `maze_b`, `maze_c`, `dynamic_b`.
+   - Bảo đảm toàn bộ 106 bài kiểm thử cũ + bộ kiểm thử mới đều PASS 100%.

@@ -14,9 +14,11 @@ from robot_sim.skills import (
     approach_target,
     closed_loop_move,
     closed_loop_turn,
+    compute_open_branches,
     cross_dynamic_gate,
     dock_target,
     explore_maze,
+    go_to_decision,
     scan_for_target,
     wait_until_settled,
 )
@@ -25,6 +27,12 @@ from robot_sim.telemetry import (
     DEFAULT_TELEMETRY_PATH,
     record_telemetry,
     stop_telemetry,
+)
+from robot_sim.topo import (
+    DEFAULT_TOPO_STATE_PATH,
+    TopologicalOdometer,
+    branches_to_cardinals,
+    is_cardinal_aligned,
 )
 
 DEFAULT_URL = "http://127.0.0.1:8765"
@@ -269,6 +277,38 @@ def build_parser() -> argparse.ArgumentParser:
     p_dock.add_argument("--max-steps", type=int, default=80, help="Số nhịp tối đa (mặc định: 80)")
     p_dock.add_argument("--step-dt", type=float, default=0.12, help="Chu kỳ mỗi nhịp điều khiển (giây)")
 
+    p_go = sub.add_parser(
+        "go",
+        help="Kỹ năng gộp System 1 (Mode C hybrid-brain): xoay khóa trục, tiến giữ tâm, lướt góc chữ L 1 lối đi và đồng bộ đồ thị Topo",
+    )
+    go_dir = p_go.add_mutually_exclusive_group()
+    go_dir.add_argument(
+        "--cardinal",
+        type=lambda s: str(s).strip().upper(),
+        choices=["E", "N", "W", "S"],
+        default=None,
+        help="Hướng hệ quy chiếu khởi hành cần khóa trước khi chạy (E=0°, N=+90°, W=180°, S=-90°)",
+    )
+    go_dir.add_argument(
+        "--heading-deg",
+        type=float,
+        default=None,
+        help="Góc hướng mục tiêu tùy chọn theo độ trong hệ quy chiếu khởi hành",
+    )
+    p_go.add_argument("--max-dist", type=float, default=6.0, help="Tổng quãng đường tối đa của một lệnh go (mét, mặc định: 6.0)")
+    p_go.add_argument("--speed", type=float, default=0.55, help="Tốc độ tiến hành lang (m/s, mặc định: 0.55)")
+    p_go.add_argument("--step-dt", type=float, default=0.10, help="Chu kỳ điều khiển mỗi nhịp (giây, mặc định: 0.10)")
+    p_go.add_argument("--max-chain", type=int, default=6, help="Số đoạn tối đa nối liên tiếp qua góc chữ L (mặc định: 6)")
+    p_go.add_argument("--no-chain", action="store_true", help="Tắt tự động lướt góc chữ L (chỉ chạy đúng 1 chặng)")
+
+    p_topo = sub.add_parser(
+        "topo",
+        help="Đọc hoặc xóa sổ cái định vị đồ thị Odometry khách quan (Mode C hybrid-brain)",
+    )
+    topo_sub = p_topo.add_subparsers(dest="topo_action", required=True)
+    topo_sub.add_parser("show", help="Đọc cảm biến hiện tại, cập nhật nút đứng và in bản đồ Topo JSON")
+    topo_sub.add_parser("reset", help="Xóa phiên đồ thị Topo của địa chỉ --url hiện tại")
+
     sub.add_parser("stop", help="Dừng khẩn cấp hai động cơ bánh xe")
 
     p_reset = sub.add_parser("reset", help="Đưa robot và mục tiêu về trạng thái ban đầu")
@@ -361,6 +401,10 @@ def main(argv: list[str] | None = None) -> int:
                 output["after_status"] = _wait_for_completion(
                     args.url, output["duration_s"], include_vision=args.vision
                 )
+            if TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH):
+                TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH).cancel_pending_leg(
+                    output.get("after_status")
+                )
         elif args.command == "move":
             meters = args.meters_opt if args.meters_opt is not None else args.meters
             if meters is None:
@@ -379,6 +423,10 @@ def main(argv: list[str] | None = None) -> int:
                     output["after_status"] = _wait_for_completion(
                         args.url, output["duration_s"], include_vision=args.vision
                     )
+            if TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH):
+                TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH).cancel_pending_leg(
+                    output.get("after_status")
+                )
         elif args.command == "turn":
             degrees = args.degrees_opt if args.degrees_opt is not None else args.degrees
             if degrees is None:
@@ -402,6 +450,18 @@ def main(argv: list[str] | None = None) -> int:
                     output["after_status"] = _wait_for_completion(
                         args.url, output["duration_s"], include_vision=args.vision
                     )
+            if (
+                args.wait
+                and "after_status" in output
+                and TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
+            ):
+                topo_inst = TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
+                after_st = output["after_status"]
+                yaw_after = float(after_st["sensors"]["gyro_yaw_deg"])
+                if topo_inst.current_node is None and not is_cardinal_aligned(yaw_after, tol_deg=20.0):
+                    topo_inst.cancel_pending_leg(after_st)
+                else:
+                    topo_inst.observe_status(after_st)
         elif args.command == "scan":
             call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
             output = scan_for_target(
@@ -411,6 +471,13 @@ def main(argv: list[str] | None = None) -> int:
                 angular_speed_deg_s=args.speed,
                 recover_occlusion=args.recover_occlusion,
             )
+            if (
+                "after_status" in output
+                and TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
+            ):
+                TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH).observe_status(
+                    output["after_status"]
+                )
         elif args.command == "approach":
             call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
             output = approach_target(
@@ -442,6 +509,11 @@ def main(argv: list[str] | None = None) -> int:
                 call_fn,
                 timeout_s=args.timeout,
             )
+            yaw_after = float(output["after_status"]["sensors"]["gyro_yaw_deg"])
+            output["open_cardinals"] = branches_to_cardinals(output["open_branches"], yaw_after)
+            if TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH):
+                topo_inst = TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
+                output["topo"] = topo_inst.record_progress(output["moved_m"], output["after_status"])
         elif args.command == "dock":
             call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
             output = dock_target(
@@ -450,6 +522,45 @@ def main(argv: list[str] | None = None) -> int:
                 max_steps=args.max_steps,
                 step_dt=args.step_dt,
             )
+            if (
+                "after_status" in output
+                and TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
+            ):
+                TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH).observe_status(
+                    output["after_status"]
+                )
+        elif args.command == "go":
+            call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
+            topo_inst = TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
+            output = go_to_decision(
+                call_fn,
+                cardinal=args.cardinal,
+                heading_deg=args.heading_deg,
+                max_dist=args.max_dist,
+                speed_m_s=args.speed,
+                step_dt=args.step_dt,
+                max_chain=args.max_chain,
+                auto_chain=not args.no_chain,
+                topo=topo_inst,
+            )
+        elif args.command == "topo":
+            if args.topo_action == "reset":
+                TopologicalOdometer.reset_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
+                output = {"reset": True}
+            else:
+                res = _call_bridge(args.url, "/status?vision=1", "GET")
+                clean_st = _strip_debug(res, keep_debug=False)
+                topo_inst = TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
+                topo_snap = topo_inst.observe_status(clean_st)
+                rf = clean_st["sensors"]["rangefinders_m"]
+                yaw_deg = float(clean_st["sensors"]["gyro_yaw_deg"])
+                open_branches = compute_open_branches(rf)
+                output = {
+                    "topo": topo_snap,
+                    "open_branches": open_branches,
+                    "open_cardinals": branches_to_cardinals(open_branches, yaw_deg),
+                    "after_status": clean_st,
+                }
         elif args.command == "stop":
             output = _call_bridge(args.url, "/stop", "POST", {})
         elif args.command == "reset":
@@ -457,6 +568,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise BridgeRequestError("Cần truyền cả --target-x lẫn --target-y khi đổi vị trí mục tiêu.")
             target_xy = [args.target_x, args.target_y] if args.target_x is not None else None
             res = _call_bridge(args.url, "/reset", "POST", {"target_xy": target_xy})
+            if TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH):
+                TopologicalOdometer.reset_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
             output = _strip_debug(res, keep_debug=False)
             if args.vision:
                 output["vision"] = _call_bridge(args.url, "/vision?camera=front_cam", "GET")
@@ -479,6 +592,8 @@ def main(argv: list[str] | None = None) -> int:
                     "target_xy": target_xy,
                 },
             )
+            if TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH):
+                TopologicalOdometer.reset_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
             output = _strip_debug(res, keep_debug=False)
             if args.vision:
                 output["vision"] = _call_bridge(args.url, "/vision?camera=front_cam", "GET")

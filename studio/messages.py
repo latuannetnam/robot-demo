@@ -51,3 +51,6 @@ class RobotTelemetry(messages.Snapshot):
   rf_right120: float = 3.0
   contact_count: int = 0
   in_contact: bool = False
+  topo_node_count: int = 0
+  topo_current_node: int = -1
+  topo_open_exits: int = 0

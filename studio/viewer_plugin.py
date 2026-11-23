@@ -142,5 +142,10 @@ class ViewerPlugin(plugin.ViewerPlugin):
           f'RF Side  (m): L90={t.rf_left90:.2f} R90={t.rf_right90:.2f} | '
           f'L120={t.rf_left120:.2f} R120={t.rf_right120:.2f}'
       )
+      if t.topo_node_count > 0:
+        cur_str = f'#{t.topo_current_node}' if t.topo_current_node >= 0 else 'mid-edge'
+        imgui.TextUnformatted(
+            f'Topo Graph: {t.topo_node_count} nodes | Current: {cur_str} | Open exits: {t.topo_open_exits}'
+        )
     finally:
       imgui.End()
