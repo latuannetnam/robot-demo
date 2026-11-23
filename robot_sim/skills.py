@@ -2947,12 +2947,22 @@ def cross_dynamic_gate(call_fn: BridgeCall, timeout_s: float = 12.0) -> dict:
                         break
                     if cn in prev_obs:
                         d_ox = ox_w - prev_obs[cn]
-                        if (ox_w * d_ox) <= 0.004:
+                        if (ox_w * d_ox) <= 0.004 and not (
+                            abs(ox_w) >= 0.85
+                            and (ox_w * d_ox) >= -0.004
+                            and float(w_rf["center"]) > 0.90
+                            and min(float(w_rf["left"]), float(w_rf["right"])) > 0.42
+                        ):
                             obs_blocking = True
                             break
                     else:
-                        obs_blocking = True
-                        break
+                        if not (
+                            abs(ox_w) >= 0.85
+                            and float(w_rf["center"]) > 0.90
+                            and min(float(w_rf["left"]), float(w_rf["right"])) > 0.42
+                        ):
+                            obs_blocking = True
+                            break
             prev_obs = cur_map
             center_ok = (float(w_rf["center"]) > 0.78) or (
                 not w_obs and not wing_approaching and float(w_rf["center"]) > 0.45

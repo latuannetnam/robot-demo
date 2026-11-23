@@ -636,3 +636,60 @@ def test_topo_passthrough_of_known_intermediate_node_does_not_orphan_it(tmp_path
     assert snap["nodes"][1]["exits"]["S"]["state"] == "open"
     assert snap["nodes"][1]["exits"]["E"]["out_visits"] == 1
     assert snap["nodes"][0]["exits"]["W"]["in_visits"] == 1
+
+
+def test_cross_dynamic_gate_passes_when_piston_retracted_at_edge():
+    """When a piston gate is already retracted into its side pocket (|offset_x| >= 0.85) with clear center/sides, cross-gate must cross instead of timing out."""
+    sim_t = 0.0
+    odom_d = 0.0
+
+    def fake_call(path: str, method: str, body: dict | None = None):
+        nonlocal sim_t, odom_d
+        if path == "/wheels":
+            sim_t += 0.25
+            if body and float(body.get("left", 0.0)) > 1.0:
+                odom_d += 0.14
+            return {"ok": True}
+        if path == "/stop":
+            return {"stopped": True, "sim_time": sim_t}
+        if path.startswith("/status"):
+            return {
+                "sim_time": round(sim_t, 3),
+                "moving": False,
+                "sensors": {
+                    "rangefinders_m": {
+                        "left": 0.49,
+                        "center": 1.31 if odom_d < 0.7 else 0.48,
+                        "right": 1.04,
+                        "left90": 0.53,
+                        "right90": 0.39,
+                        "left120": 1.04,
+                        "right120": 0.47,
+                    },
+                    "gyro_yaw_deg": 88.4,
+                    "odom_dist_m": round(odom_d, 4),
+                    "odom_x_m": 1.72,
+                    "odom_y_m": round(odom_d, 4),
+                    "forward_speed_m_s": 0.0,
+                },
+                "vision": {
+                    "target_visible": False,
+                    "target": None,
+                    "obstacles": [
+                        {
+                            "color": "blue",
+                            "offset_x": -0.92,
+                            "side": "left",
+                            "area_pct": 2.45,
+                            "v_span": 0.14,
+                        }
+                    ]
+                    if odom_d < 0.3
+                    else [],
+                },
+            }
+        raise AssertionError(f"Unexpected call: {path}")
+
+    res = cross_dynamic_gate(fake_call, timeout_s=4.0)
+    assert res["crossed"] is True
+    assert res["moved_m"] >= 0.65
