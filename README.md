@@ -24,14 +24,17 @@ Dự án nhập môn thực hành mô phỏng vật lý **MuJoCo** dành cho ng�
 
 ## 2. Khởi chạy Nhanh
 
-### Bước 1: Mở cửa sổ 3D MuJoCo
-Mở một cửa sổ PowerShell tại thư mục dự án và chạy:
+### Bước 1: Mở cửa sổ 3D MuJoCo (Desktop Viewer hoặc MuJoCo Studio)
+
+- **Cách A — Desktop Viewer (`sim_server.py`):** Mở một cửa sổ PowerShell tại thư mục dự án và chạy:
 
 ```powershell
 uv run python sim_server.py
 # Hoặc mở thẳng vào một bản đồ mê cung:
 # uv run python sim_server.py --arena maze_a
 ```
+
+- **Cách B — MuJoCo Studio Web Sidecar (`studio/`):** Stream 3D trực tiếp vào Antigravity aux pane (`http://127.0.0.1:8080`) kèm bảng điều khiển ImGui + Topo HUD và tự mở cùng cầu HTTP `http://127.0.0.1:8765` (không chạy song song với `sim_server.py`). Xem hướng dẫn đầy đủ tại [`docs/mujoco-studio-runbook.md`](docs/mujoco-studio-runbook.md).
 
 Cửa sổ 3D MuJoCo sẽ hiện lên:
 - **Chuột trái + kéo:** Xoay góc nhìn camera quan sát.

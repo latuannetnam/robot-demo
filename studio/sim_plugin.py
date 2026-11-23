@@ -245,6 +245,7 @@ class SimPlugin(plugin.SimPlugin):
   _odom_dist_m: float = 0.0
   _odom_x_m: float = 0.0
   _odom_y_m: float = 0.0
+  _last_odom_time: float = 0.0
   _contact_count: int = 0
   _contact_steps: int = 0
   _in_hazard_contact: bool = False
@@ -299,6 +300,7 @@ class SimPlugin(plugin.SimPlugin):
     self._odom_dist_m = 0.0
     self._odom_x_m = 0.0
     self._odom_y_m = 0.0
+    self._last_odom_time = float(self._data.time) if self._data is not None else 0.0
     self._contact_count = 0
     self._contact_steps = 0
     self._in_hazard_contact = False
@@ -433,14 +435,16 @@ class SimPlugin(plugin.SimPlugin):
     except queue.Empty:
       return 504, {'ok': False, 'error': 'Quá thời gian chờ luồng mô phỏng MuJoCo Studio xử lý lệnh.'}
 
-  def _drain_http_queue(self) -> None:
+  def _drain_http_queue(self, max_items: int = 2) -> None:
     if self._cmd_queue is None:
       return
-    while True:
+    processed = 0
+    while processed < max_items:
       try:
         fn, resp_q, is_reload = self._cmd_queue.get_nowait()
       except queue.Empty:
         break
+      processed += 1
       try:
         result = fn(self)
         if is_reload and self._pending_reload_resp is not None:
@@ -596,7 +600,8 @@ class SimPlugin(plugin.SimPlugin):
     assert self._model is not None and self._data is not None
     assert self._bindings is not None and self._sensor_adr is not None and self._rangefinders is not None
     assert self._model_path is not None
-    mujoco.mj_forward(self._model, self._data)
+    if self._step_counter == 0:
+      mujoco.mj_forward(self._model, self._data)
 
     rangefinders_m: dict[str, float] = {}
     rangefinder_hits: dict[str, bool] = {}
@@ -666,9 +671,8 @@ class SimPlugin(plugin.SimPlugin):
       raise ValueError(f"Không tìm thấy camera '{camera_name}'.")
 
     pose_sig = (
-        self._state_epoch,
-        tuple(round(float(x), 6) for x in self._data.qpos),
-        tuple(round(float(x), 6) for x in self._data.mocap_pos[self._bindings.target_mocap_id]),
+        tuple(round(float(x), 3) for x in self._data.qpos),
+        tuple(round(float(x), 3) for x in self._data.mocap_pos[self._bindings.target_mocap_id]),
     )
     cached = self._vision_cache.get(camera_name)
     if cached is not None and cached[0] == pose_sig:
@@ -841,23 +845,28 @@ class SimPlugin(plugin.SimPlugin):
       self._in_hazard_contact = touching_now
 
     if self._sensor_adr is not None:
-      gyro_z = float(data.sensordata[self._sensor_adr['chassis_gyro'] + 2])
-      vel_adr = self._sensor_adr['chassis_vel']
-      fwd_v = float(data.sensordata[vel_adr])
-      lat_v = float(data.sensordata[vel_adr + 1])
-      dt = float(model.opt.timestep)
-      prev_yaw = self._gyro_yaw_rad
-      self._gyro_yaw_rad += gyro_z * dt
-      self._odom_dist_m += fwd_v * dt
-      mid_yaw = 0.5 * (prev_yaw + self._gyro_yaw_rad)
-      self._odom_x_m += (fwd_v * math.cos(mid_yaw) - lat_v * math.sin(mid_yaw)) * dt
-      self._odom_y_m += (fwd_v * math.sin(mid_yaw) + lat_v * math.cos(mid_yaw)) * dt
+      t_now = float(data.time)
+      dt = t_now - self._last_odom_time
+      if dt < 0.0:
+        self._last_odom_time = t_now
+      elif dt > 1e-9:
+        self._last_odom_time = t_now
+        gyro_z = float(data.sensordata[self._sensor_adr['chassis_gyro'] + 2])
+        vel_adr = self._sensor_adr['chassis_vel']
+        fwd_v = float(data.sensordata[vel_adr])
+        lat_v = float(data.sensordata[vel_adr + 1])
+        prev_yaw = self._gyro_yaw_rad
+        self._gyro_yaw_rad += gyro_z * dt
+        self._odom_dist_m += fwd_v * dt
+        mid_yaw = 0.5 * (prev_yaw + self._gyro_yaw_rad)
+        self._odom_x_m += (fwd_v * math.cos(mid_yaw) - lat_v * math.sin(mid_yaw)) * dt
+        self._odom_y_m += (fwd_v * math.sin(mid_yaw) + lat_v * math.cos(mid_yaw)) * dt
 
     if self._command_deadline is not None and data.time >= self._command_deadline:
       self.api_stop()
 
     self._step_counter += 1
-    if self._step_counter % 10 == 0:
+    if self._step_counter % 40 == 0:
       self._publish_telemetry(data)
 
   def _poll_topo_summary(self) -> tuple[int, int, int]:
