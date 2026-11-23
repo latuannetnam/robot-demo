@@ -2348,7 +2348,7 @@ def _glance_open_wings_for_dynamic_gate(
         obs_a = _obs_signature(st_a.get("vision", {}))
         obs_a_list = st_a.get("vision", {}).get("obstacles", [])
         lat_a_map = _lat_map(obs_a_list, float(st_a["sensors"]["gyro_yaw_deg"]))
-        dwell_s = 0.42 if obs_a_list else 0.16
+        dwell_s = 0.55 if obs_a_list else 0.16
         w_deadline = time.monotonic() + 1.5
         for _ in range(25):
             if time.monotonic() >= w_deadline or (float(st_b.get("sim_time", t_a)) - t_a) >= dwell_s:
@@ -2359,7 +2359,7 @@ def _glance_open_wings_for_dynamic_gate(
             if obs_a_list:
                 obs_cur_map = _obs_signature(st_b.get("vision", {}))
                 if any(
-                    cn not in obs_a or abs(obs_cur_map[cn] - obs_a[cn]) >= 0.015
+                    cn not in obs_a or abs(obs_cur_map[cn] - obs_a[cn]) >= 0.010
                     for cn in obs_cur_map
                 ):
                     break
@@ -2374,7 +2374,7 @@ def _glance_open_wings_for_dynamic_gate(
             fwd_b = zb * math.cos(d_yaw_rad) - y_cam_b * math.sin(d_yaw_rad)
             lat_b = zb * math.sin(d_yaw_rad) + y_cam_b * math.cos(d_yaw_rad)
             cn = str(o_b.get("color", ""))
-            moved_sideways = (cn not in obs_a) or abs(obs_b.get(cn, ox_b) - obs_a.get(cn, ox_b)) >= 0.015
+            moved_sideways = (cn not in obs_a) or abs(obs_b.get(cn, ox_b) - obs_a.get(cn, ox_b)) >= 0.010
             if moved_sideways and 0.14 <= fwd_b <= 1.05 and abs(lat_b) <= 1.40:
                 found_dyn = _summarize_obstacle([o_b], "dynamic")
                 if cn not in lat_a_map or abs(lat_b) < abs(lat_a_map[cn]) - 0.008 or abs(lat_b) <= 0.65:
@@ -2562,10 +2562,30 @@ def advance_segment(
                 ignored_static_colors.add(obs_sum["color"])
             return None
 
+        def _finish_target_ready_checked(cur_st: dict, *, settle: bool = True) -> dict:
+            chk_st = _stop_and_settle(call_fn, include_vision=True) if (settle or cur_st.get("moving", False)) else cur_st
+            rf_chk = chk_st["sensors"]["rangefinders_m"]
+            vis_chk = chk_st.get("vision", {})
+            t_info = vis_chk.get("target") if isinstance(vis_chk.get("target"), dict) else None
+            t_area_chk = float(t_info["area_pct"]) if t_info is not None else 0.0
+            if (
+                min(float(rf_chk.get("left90", 3.0)), float(rf_chk.get("right90", 3.0))) > 0.75
+                and float(rf_chk["center"]) > 0.50
+                and t_area_chk < 8.0
+            ):
+                obs_chk = _check_obstacle_event(chk_st)
+                if obs_chk is not None:
+                    return obs_chk
+                found_w, chk_st, w_obs, _ = _glance_open_wings_for_dynamic_gate(call_fn, chk_st, yaw0_deg)
+                _sync_local_odom(chk_st)
+                if found_w and w_obs is not None:
+                    return _finish_result("dynamic_gate_ahead", chk_st, obstacle=w_obs, settle=True)
+            return _finish_result("target_ready", chk_st, settle=False)
+
         # Kiểm tra trước khi xuất phát (ưu tiên target_ready trước khi chưa có vật cản gần hơn)
         if _is_target_ready_for_dock(st):
             stopped_cleanly = True
-            return _finish_result("target_ready", st, settle=True)
+            return _finish_target_ready_checked(st, settle=True)
 
         obs_res = _check_obstacle_event(st)
         if obs_res is not None:
@@ -2710,7 +2730,7 @@ def advance_segment(
 
             if _is_target_ready_for_dock(st):
                 stopped_cleanly = True
-                return _finish_result("target_ready", st, settle=True)
+                return _finish_target_ready_checked(st, settle=True)
 
             # Kiểm tra tường phía trước -> dừng và trả về junction hoặc dead_end
             allow_graze_now = moved < 0.22 and not st.get("vision", {}).get("obstacles")
