@@ -102,6 +102,17 @@ def test_agent_brain_skills_validate_inputs_and_compute_open_branches():
         "left",
         "right",
     ]
+    # Single ±30° diagonal grazing a corner while center + opposite diagonal are wide open -> still reports "straight"
+    assert compute_open_branches(
+        {"center": 1.265, "left": 1.069, "right": 0.25, "left90": 0.734, "right90": 3.0}
+    ) == ["left", "straight", "right"]
+    # Both diagonals narrow OR one diagonal dangerously close (< 0.20 m) -> "straight" must remain omitted
+    assert compute_open_branches(
+        {"center": 0.85, "left": 0.25, "right": 0.25, "left90": 0.8, "right90": 0.8}
+    ) == ["left", "right"]
+    assert compute_open_branches(
+        {"center": 1.20, "left": 1.00, "right": 0.18, "left90": 0.8, "right90": 0.8}
+    ) == ["left", "right"]
 
 
 def test_advance_segment_events_stateless_unit():
@@ -191,6 +202,47 @@ def test_advance_segment_events_stateless_unit():
     res_max = advance_segment(_MockBotBridge(max_states, advance_odom_on_drive=False), max_dist=0.80, step_dt=0.05)
     assert res_max["event"] == "max_dist"
     assert "debug" not in res_max["after_status"]
+
+
+def test_advance_segment_exits_current_open_junction_without_zero_move_retrigger():
+    # Case A: Already sitting in an open junction (left90=0.734, right90=3.0) with a clear straight corridor
+    # (center=1.265, left=1.069) even when right diagonal grazes a corner (0.25) and left120 sees trailing wall (0.45).
+    # Must advance straight through instead of returning moved_m == 0.0 / re-triggering on the same junction.
+    open_junc_states = [
+        {"sim_time": 0.0, "odom_dist_m": 0.00, "rangefinders_m": {"left": 1.069, "center": 1.265, "right": 0.25, "left90": 0.734, "right90": 3.0, "left120": 0.45, "right120": 3.0}},
+        {"sim_time": 0.1, "odom_dist_m": 0.15, "rangefinders_m": {"left": 1.00, "center": 1.12, "right": 0.42, "left90": 0.85, "right90": 3.0, "left120": 0.50, "right120": 3.0}},
+        {"sim_time": 0.2, "odom_dist_m": 0.35, "rangefinders_m": {"left": 0.90, "center": 0.92, "right": 0.75, "left90": 0.95, "right90": 2.5, "left120": 0.95, "right120": 2.5}},
+        {"sim_time": 0.3, "odom_dist_m": 0.60, "rangefinders_m": {"left": 0.85, "center": 0.70, "right": 0.85, "left90": 0.42, "right90": 0.42, "left120": 0.48, "right120": 0.48}},
+        {"sim_time": 0.4, "odom_dist_m": 0.82, "moving": False, "rangefinders_m": {"left": 0.85, "center": 0.65, "right": 0.85, "left90": 0.42, "right90": 0.42, "left120": 0.48, "right120": 0.48}},
+    ]
+    res_through = advance_segment(_MockBotBridge(open_junc_states, advance_odom_on_drive=False), max_dist=0.80, step_dt=0.05)
+    assert res_through["event"] == "max_dist"
+    assert res_through["moved_m"] >= 0.75
+    assert "debug" not in res_through["after_status"]
+
+    # Case B: Starting inside an open junction, entering a walled corridor, then reaching a NEW rising-edge opening
+    # must pass the first junction and stop at the new one.
+    next_junc_states = [
+        {"sim_time": 0.0, "odom_dist_m": 0.00, "rangefinders_m": {"left": 1.1, "center": 2.0, "right": 1.1, "left90": 0.72, "right90": 0.72, "left120": 0.72, "right120": 0.72}},
+        {"sim_time": 0.1, "odom_dist_m": 0.25, "rangefinders_m": {"left": 0.8, "center": 1.75, "right": 0.8, "left90": 0.40, "right90": 0.40, "left120": 0.45, "right120": 0.45}},
+        {"sim_time": 0.2, "odom_dist_m": 0.55, "rangefinders_m": {"left": 0.8, "center": 1.45, "right": 0.8, "left90": 0.95, "right90": 0.40, "left120": 0.95, "right120": 0.45}},
+        {"sim_time": 0.3, "odom_dist_m": 0.80, "moving": False, "rangefinders_m": {"left": 0.8, "center": 1.20, "right": 0.8, "left90": 0.95, "right90": 0.40, "left120": 0.95, "right120": 0.45}},
+    ]
+    res_next = advance_segment(_MockBotBridge(next_junc_states, advance_odom_on_drive=False), max_dist=1.80, step_dt=0.05)
+    assert res_next["event"] == "junction"
+    assert res_next["moved_m"] >= 0.60
+    assert "left" in res_next["open_branches"]
+    assert "straight" in res_next["open_branches"]
+    assert "debug" not in res_next["after_status"]
+
+    # Case C: Starting in an open junction with a dangerously close diagonal (< 0.20 m) still stops immediately for safety.
+    tight_corner_states = [
+        {"sim_time": 0.0, "odom_dist_m": 0.00, "moving": False, "rangefinders_m": {"left": 1.0, "center": 1.2, "right": 0.18, "left90": 0.80, "right90": 0.80}},
+    ]
+    res_tight = advance_segment(_MockBotBridge(tight_corner_states, advance_odom_on_drive=False), max_dist=1.20, step_dt=0.05)
+    assert res_tight["event"] == "junction"
+    assert res_tight["moved_m"] == 0.0
+    assert "straight" not in res_tight["open_branches"]
 
 
 def test_cross_dynamic_gate_and_dock_target_refusal_unit():

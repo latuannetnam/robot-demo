@@ -14,33 +14,42 @@ Unlike auto-pilot mode, the lower-level skills are purely **stateless 20 Hz refl
   - `move <meters> --speed 0.35 --wait --vision` — short heading-hold translation (useful for static-obstacle flank detours).
   - `scan --no-recover-occlusion [--max-degrees 360] [--direction left|right]` — ALWAYS pass `--no-recover-occlusion` (`scan --no-recover-occlusion`) so `scan` rotates purely in place without hidden forward translation.
   - `wheels <left> <right> --duration <s> --wait --vision` and `stop`.
-  - `camera --name front_cam` — use **selectively** only when Edge Vision JSON is ambiguous or during static obstacle detours.
+  - `camera --name front_cam` — use **ONLY** for open-space `static_obstacle_ahead` detours (or ambiguous open-space occlusion). **NEVER** call `camera --name front_cam` in standard maze corridors where rangefinders and `open_branches` are already unambiguous.
 - **Strictly Forbidden:**
   - NEVER pass `--debug`.
   - NEVER call `arenas`, `reset`, `reload`, `demo`, or `telemetry`.
   - NEVER call `explore` or `approach` (those are forbidden Mode A auto-nav skills).
   - NEVER request `overview_cam`, and NEVER read project source files (`models/`, `robot_sim/`, `robot_ctl.py`, `captures/telemetry_latest.json`).
 
-## 2. Topological Scratchpad (Mandatory After Every `advance` / `turn` / `cross-gate`)
-Maintain an explicit compact scratchpad inside your chain-of-thought after every motion step:
-1. **Pose & Node Matching:** Read `after_status.sensors.odom_x_m`, `odom_y_m`, and `gyro_yaw_deg`.
-   - Normalize heading to one of 4 cardinals: **`E` (`≈ 0°`), `N` (`≈ +90°`), `W` (`≈ ±180°`), `S` (`≈ -90°`)**.
-   - If `hypot(odom_x_m - nx, odom_y_m - ny) <= 0.40`, reuse existing `Node #k`! Otherwise register a new `Node #N (nx, ny)`.
-2. **Branch Table on Each Node:** Convert relative `open_branches` (`left`, `straight`, `right`) to absolute cardinals (`E`, `N`, `W`, `S`) relative to current heading. Track every cardinal exit as:
-   - `unexplored` (newly discovered open corridor),
-   - `visited` (already traversed / incoming loop connection), or
-   - `dead_end` (confirmed blocked subtree — **NEVER re-enter a `dead_end` or `visited` branch blindly; keep `redundant_revisit_count == 0`**).
-3. **Parent Stack:** Push `(node_id, outgoing_cardinal)` when leaving for an `unexplored` branch so backtracking knows the exact return corridor and node ancestry.
+## 2. Topological Scratchpad & Cardinal Snap (Mandatory After Every `advance` / `turn` / `cross-gate`)
+Keep a compact scratchpad (<= 6 lines per step to stay fast) inside your chain-of-thought:
+1. **Pose, Cardinal Heading & Exact Snap Formula:** Read `after_status.sensors.odom_x_m`, `odom_y_m`, and `gyro_yaw_deg`.
+   - Exact cardinal angles: **`E = 0°`, `N = +90°`, `W = ±180°`, `S = -90°`**.
+   - **MANDATORY CARDINAL SNAP IN MAZES:** Every maze turn MUST snap to the exact target cardinal using:
+     `turn_deg = wrap180(target_cardinal_deg - gyro_yaw_deg)` (round to integer; if `abs(turn_deg) <= 5`, skip `turn` and call `advance`).
+     **NEVER** issue arbitrary fractional/eyeballed turns (e.g., `-76`, `60`, `-45`, `25`) in maze corridors.
+   - **Relative-to-Cardinal Lookup (never invert `left`/`right`):**
+     - Facing `E (0°)`: `left=N`, `straight=E`, `right=S`, `back=W`
+     - Facing `N (+90°)`: `left=W`, `straight=N`, `right=E`, `back=S`
+     - Facing `W (±180°)`: `left=S`, `straight=W`, `right=N`, `back=E`
+     - Facing `S (-90°)`: `left=E`, `straight=S`, `right=W`, `back=N`
+2. **Node Matching & Branch Table:**
+   - If `hypot(odom_x_m - nx, odom_y_m - ny) <= 0.40`, reuse existing `Node #k`; else create `Node #N (nx, ny)`.
+   - On arrival at `Node #k`, **immediately mark `back` (incoming cardinal) as `visited`** (unless already `dead_end`). Never treat your incoming corridor as `unexplored`.
+   - Convert `open_branches` (`left`, `straight`, `right`) to cardinals (`E`, `N`, `W`, `S`) via the lookup table above; mark each as `unexplored` **only if** not already `visited` or `dead_end`.
+3. **Strict DFS Parent Stack (`redundant_revisit_count == 0`):**
+   - Push `(node_id, outgoing_cardinal)` when leaving `node_id` onto an `unexplored` exit, and immediately mark that exit `visited` on `node_id`.
+   - **NEVER** enter a `visited` or `dead_end` exit during forward exploration. The **ONLY** allowed traversal of a `visited` corridor is backtracking by popping `(parent_id, out_c)` from the Parent Stack.
 
 ## 3. Tactical Decision Policy Across All Scenarios
 1. **Start (`status --vision`):** Inspect sensors and Edge Vision.
    - If in open space and `target_visible == false`, run `scan --max-degrees 360 --direction left --no-recover-occlusion`.
-   - Else drive forward using `advance`.
-2. **Mazes & Dead-Ends (`dead_end` / `junction`):**
-   - On `dead_end` (`open_branches == []`): mark current branch from parent as `dead_end`, run `turn 180 --wait --vision`, then `advance` back to the parent `Node #k` and take its next `unexplored` branch (if none left on `Node #k`, backtrack further up your stack!).
-   - On `junction`: update `Node #k`, pick an `unexplored` cardinal exit, compute exact turn delta (`left -> +90`, `straight -> 0`, `right -> -90`), run `turn` if non-zero, then `advance`.
+   - Else register `Node #0 (0.0, 0.0)` and drive forward using `advance`.
+2. **Mazes, Junctions & Dead-Ends (`junction` / `dead_end`):**
+   - On `dead_end` (`open_branches == []`) or when current `Node #k` has **zero `unexplored` exits**: pop `(parent_id, out_c)` from Parent Stack, mark `out_c` on `parent_id` as `dead_end`, snap-turn to `opp(out_c)` using `wrap180(target_cardinal_deg - gyro_yaw_deg)`, and `advance` back to `parent_id`.
+   - On `junction` with `>= 1` `unexplored` exit: pick one `unexplored` cardinal `C`, mark `C` as `visited` on `Node #k`, push `(Node #k, C)` to Parent Stack, compute `turn_deg = wrap180(cardinal(C) - gyro_yaw_deg)`, run `turn <turn_deg> --wait --vision` if `abs(turn_deg) > 5`, then `advance`.
 3. **Loops / U-Islands:**
-   - If `advance` arrives within `0.40 m` of an **existing `Node #k`** while approaching from a new edge and the target is not visible, explicitly record **"Loop closing on `Node #k`"**, mark both ends of that loop chord as `visited`, and turn immediately onto any remaining `unexplored` exit on `Node #k` (or backtrack to an ancestor with `unexplored` exits) instead of looping blindly.
+   - If `advance` arrives within `0.40 m` of an **existing `Node #k`** from a new corridor and target is not visible, record **"Loop closing on `Node #k`"**, mark both ends of that loop chord as `visited`, and immediately take any remaining `unexplored` exit on `Node #k` (or pop Parent Stack to backtrack to an ancestor with `unexplored` exits).
 4. **Static Obstacles (`event == "static_obstacle_ahead"`):**
    - Inspect `flank_clearance_m` (and optionally `camera --name front_cam`). Choose the clearer flank side (`+` left or `-` right), `turn ±65 --wait --vision`, `move 0.55 --speed 0.35 --wait --vision` to sidestep cleanly, `scan --max-degrees 180 --direction <back_toward_center> --no-recover-occlusion` (or `turn` back), then `advance`.
 5. **Dynamic Patrol Lanes & Piston Gates (`event == "dynamic_gate_ahead"`):**

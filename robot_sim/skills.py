@@ -2111,14 +2111,34 @@ def compute_open_branches(rf: dict[str, float]) -> list[str]:
     rf_r = float(rf.get("right", rf_c))
     rf_l90 = float(rf.get("left90", 0.0))
     rf_r90 = float(rf.get("right90", 0.0))
+    min_diag = min(rf_l, rf_r)
+    max_diag = max(rf_l, rf_r)
     branches: list[str] = []
     if rf_l90 > 0.55:
         branches.append("left")
-    if rf_c > 0.62 and min(rf_l, rf_r) > 0.34:
+    if rf_c > 0.62 and (min_diag > 0.34 or (min_diag > 0.20 and max_diag > 0.55)):
         branches.append("straight")
     if rf_r90 > 0.55:
         branches.append("right")
     return branches
+
+
+def _is_front_blocked(rf: dict[str, float], *, allow_corner_grazing: bool = False) -> bool:
+    """Xác định phía trước thực sự bị chắn (chỉ bỏ qua tia chéo ±30° sượt mép góc lúc xuất phát khi không có vật cản)."""
+    rf_c = float(rf["center"])
+    rf_l = float(rf["left"])
+    rf_r = float(rf["right"])
+    if rf_c < 0.40:
+        return True
+    min_diag = min(rf_l, rf_r)
+    max_diag = max(rf_l, rf_r)
+    if min_diag < 0.20:
+        return True
+    if min_diag < 0.28:
+        if allow_corner_grazing and rf_c > 0.62 and max_diag > 0.55:
+            return False
+        return True
+    return False
 
 
 def _obs_signature(vis_dict: dict) -> dict[str, float]:
@@ -2610,15 +2630,12 @@ def advance_segment(
             return _finish_result(ev_block, settled, settle=False)
 
         rf_now = st["sensors"]["rangefinders_m"]
-        rf_c = float(rf_now["center"])
-        rf_l = float(rf_now["left"])
-        rf_r = float(rf_now["right"])
-        if rf_c < 0.40 or min(rf_l, rf_r) < 0.28:
+        if _is_front_blocked(rf_now, allow_corner_grazing=not st.get("vision", {}).get("obstacles")):
             stopped_cleanly = True
             return _resolve_front_block(st, do_settle=False)
 
-        saw_left_wall = l90_0 < 0.65
-        saw_right_wall = r90_0 < 0.65
+        saw_left_wall = l90_0 <= 0.55
+        saw_right_wall = r90_0 <= 0.55
         left_edge_odom = odom0 + 0.10 if saw_left_wall else odom0
         right_edge_odom = odom0 + 0.10 if saw_right_wall else odom0
         left_open_streak = 0
@@ -2669,23 +2686,22 @@ def advance_segment(
                 return _finish_result("target_ready", st, settle=True)
 
             # Kiểm tra tường phía trước -> dừng và trả về junction hoặc dead_end
-            if rf_c < 0.40 or min(rf_l, rf_r) < 0.28:
+            allow_graze_now = moved < 0.22 and not st.get("vision", {}).get("obstacles")
+            if _is_front_blocked(rf, allow_corner_grazing=allow_graze_now):
                 stopped_cleanly = True
                 return _resolve_front_block(st, do_settle=True)
 
             # Cập nhật lịch sử tường hông trong phạm vi lần gọi này (vô trạng thái giữa các lần gọi)
             if moved >= 0.08:
-                if rf_l90 < 0.65:
+                if rf_l90 <= 0.55:
                     saw_left_wall = True
                     left_edge_odom = max(left_edge_odom, odom_m + 0.08)
-                if has_120 and rf_l120 < 0.72:
-                    saw_left_wall = True
+                if saw_left_wall and has_120 and rf_l120 < 0.72:
                     left_edge_odom = max(left_edge_odom, odom_m + 0.05 - 0.5 * rf_l120)
-                if rf_r90 < 0.65:
+                if rf_r90 <= 0.55:
                     saw_right_wall = True
                     right_edge_odom = max(right_edge_odom, odom_m + 0.08)
-                if has_120 and rf_r120 < 0.72:
-                    saw_right_wall = True
+                if saw_right_wall and has_120 and rf_r120 < 0.72:
                     right_edge_odom = max(right_edge_odom, odom_m + 0.05 - 0.5 * rf_r120)
 
             l_open_now = (rf_l90 > 0.75 and rf_l120 > 0.72) if has_120 else (rf_l90 > 0.72)
@@ -2722,7 +2738,12 @@ def advance_segment(
 
             cur_yaw_deg = float(st["sensors"]["gyro_yaw_deg"])
             yaw_rate_deg_s = math.degrees(float(st["sensors"].get("yaw_rate_rad_s", 0.0)))
-            yaw_bias = _corridor_heading_bias(rf, in_narrow_now) if in_narrow_now else 0.0
+            if in_narrow_now:
+                yaw_bias = _corridor_heading_bias(rf, True)
+            elif allow_graze_now and min(rf_l, rf_r) < 0.36:
+                yaw_bias = _corridor_heading_bias(rf, False)
+            else:
+                yaw_bias = 0.0
             yaw_err = _wrap_angle_deg((corridor_yaw_deg + yaw_bias) - cur_yaw_deg)
             trim = max(-3.2, min(3.2, 0.26 * yaw_err - 0.022 * yaw_rate_deg_s))
 

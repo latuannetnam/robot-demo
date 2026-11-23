@@ -61,6 +61,10 @@ def test_agent_brain_mode_docs_and_driver_prompt():
         "odom_x_m",
         "odom_y_m",
         "gyro_yaw_deg",
+        "wrap180(target_cardinal_deg - gyro_yaw_deg)",
+        "static_obstacle_ahead",
+        "redundant_revisit_count == 0",
+        "Parent Stack",
     ):
         assert kw in brain_text
 
