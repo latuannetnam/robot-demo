@@ -126,6 +126,10 @@ def test_hybrid_brain_mode_c_docs_driver_prompt_and_studio_messages():
     assert "topo_node_count: int = 0" in studio_msgs
     assert "topo_current_node: int = -1" in studio_msgs
     assert "topo_open_exits: int = 0" in studio_msgs
-    assert "read_topo_studio_summary" in studio_sim
+    assert "topo_goal_node: int = -1" in studio_msgs
+    assert "keep_topo: bool = False" in studio_msgs
+    assert "read_topo_studio_details" in studio_sim
     assert "Topo Graph:" in studio_viewer
+    assert "Reset (Keep Topo)" in studio_viewer
+    assert "Goal: #" in studio_viewer
     assert ".topo_state.json" not in studio_viewer  # viewer must never perform 60 FPS disk I/O

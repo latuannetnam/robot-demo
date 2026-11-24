@@ -537,47 +537,70 @@ def test_go_to_decision_small_positive_max_dist_does_not_assert():
 
 
 def test_studio_sim_plugin_poll_topo_summary_throttles_and_survives_corrupt_file(tmp_path: Path, monkeypatch):
-    """Important review fix: runtime unit test for SimPlugin._poll_topo_summary() throttle, missing, and corrupt JSON."""
+    """Important review fix + Task 4: runtime unit test for SimPlugin._poll_topo_summary() 4-tuple, goal_id, keep_topo reset, and corrupt JSON."""
     import sys
+    from robot_sim.topo import read_topo_studio_details
 
     studio_dir = str((Path(__file__).resolve().parents[1] / "studio").resolve())
     if studio_dir not in sys.path:
         sys.path.insert(0, studio_dir)
+    import messages as studio_msgs
     import sim_plugin as sp_mod
+
+    assert studio_msgs.ResetRobotEvent().keep_topo is False
+    assert studio_msgs.ResetRobotEvent(keep_topo=True).keep_topo is True
+    assert studio_msgs.RobotTelemetry().topo_goal_node == -1
 
     state_file = tmp_path / ".topo_state.json"
     monkeypatch.setattr(sp_mod, "DEFAULT_TOPO_STATE_PATH", state_file)
     monkeypatch.setattr(
         sp_mod,
-        "read_topo_studio_summary",
-        lambda base_url="http://127.0.0.1:8765": read_topo_studio_summary(base_url, state_path=state_file),
+        "read_topo_studio_details",
+        lambda base_url="http://127.0.0.1:8765": read_topo_studio_details(base_url, state_path=state_file),
     )
 
     plugin_inst = sp_mod.SimPlugin()
     plugin_inst._topo_poll_wall = -10.0
 
-    # 1. Missing file -> (0, -1, 0)
-    assert plugin_inst._poll_topo_summary() == (0, -1, 0)
+    # 1. Missing file -> (0, -1, 0, -1)
+    assert plugin_inst._poll_topo_summary() == (0, -1, 0, -1)
 
-    # 2. Write valid state file within 0.5s window -> throttled, still returns cached (0, -1, 0)
+    # 2. Write valid state file within 0.5s window -> throttled, still returns cached (0, -1, 0, -1)
     topo = TopologicalOdometer("http://127.0.0.1:8765", state_path=state_file)
-    topo.observe_status(_mk_status(sim_time=0.2, x=0.0, y=0.0, yaw_deg=0.0))
-    assert plugin_inst._poll_topo_summary() == (0, -1, 0)
+    rf_cor = {"left": 0.9, "center": 1.8, "right": 0.9, "left90": 0.35, "right90": 0.35}
+    topo.observe_status(_mk_status(sim_time=0.2, x=0.0, y=0.0, yaw_deg=0.0, rf=rf_cor))
+    assert plugin_inst._poll_topo_summary() == (0, -1, 0, -1)
 
-    # 3. After >= 0.5s elapsed -> picks up (1, 0, 1)
+    # 3. After >= 0.5s elapsed -> picks up (1, 0, 1, -1)
     plugin_inst._topo_poll_wall -= 0.6
-    assert plugin_inst._poll_topo_summary() == (1, 0, 1)
+    assert plugin_inst._poll_topo_summary() == (1, 0, 1, -1)
 
-    # 3b. Minor #3: Studio UI reset must NOT reload stale .topo_state.json after 0.6s until a new write occurs
-    plugin_inst._reset_odom_and_contacts()
+    # 3a. Anchor a goal node -> reports goal_id == 1
+    topo.begin_leg(_mk_status(sim_time=0.3, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    topo.finish_go("target_ready", 1.0, _mk_status(sim_time=2.0, x=1.0, y=0.0, odom_dist=1.0, yaw_deg=0.0, rf=rf_cor), in_corridor=True)
+    topo.record_dock(0.3, _mk_status(sim_time=2.5, x=1.3, y=0.0, odom_dist=1.3, yaw_deg=0.0, rf={"left": 0.7, "center": 0.27, "right": 0.7, "left90": 0.35, "right90": 0.35}), reached=True)
     plugin_inst._topo_poll_wall -= 0.6
-    assert plugin_inst._poll_topo_summary() == (0, -1, 0)
+    plugin_inst._topo_mtime_ns = -1
+    assert plugin_inst._poll_topo_summary() == (2, 1, 0, 1)
 
-    # 4. Corrupt JSON after >= 0.5s -> no exception, safe fallback (0, -1, 0)
+    # 3b. keep_topo=True reset preserves nodes + goal_id == 1 and zeroes visits
+    plugin_inst._sync_topo_on_ui_reset(keep_topo=True, status=_mk_status(sim_time=0.0, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    assert plugin_inst._topo_summary == (2, 0, 0, 1)
+    reloaded = TopologicalOdometer("http://127.0.0.1:8765", state_path=state_file)
+    assert reloaded.nodes[0]["exits"]["E"]["out_visits"] == 0
+    assert reloaded.nodes[1]["kind"] == "goal"
+
+    # 3c. keep_topo=False reset deletes session and resets summary to (0, -1, 0, -1)
+    plugin_inst._sync_topo_on_ui_reset(keep_topo=False, status=None)
+    assert not TopologicalOdometer.has_active_session("http://127.0.0.1:8765", state_path=state_file)
+    plugin_inst._topo_poll_wall -= 0.6
+    assert plugin_inst._poll_topo_summary() == (0, -1, 0, -1)
+
+    # 4. Corrupt JSON after >= 0.5s -> no exception, safe fallback (0, -1, 0, -1)
     state_file.write_text("{broken", encoding="utf-8")
     plugin_inst._topo_poll_wall -= 0.6
     plugin_inst._topo_mtime_ns = -1
-    assert plugin_inst._poll_topo_summary() == (0, -1, 0)
+    assert plugin_inst._poll_topo_summary() == (0, -1, 0, -1)
 
 
 def test_topo_passthrough_of_known_intermediate_node_does_not_orphan_it(tmp_path: Path):

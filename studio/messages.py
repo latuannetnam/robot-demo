@@ -17,6 +17,8 @@ class ArenaSelectEvent(messages.Event):
 class ResetRobotEvent(messages.Event):
   """UI -> sim: reset robot to the arena spawn pose and clear counters."""
 
+  keep_topo: bool = False
+
 
 @dataclasses.dataclass(frozen=True)
 class DriveCommand(messages.Snapshot):
@@ -54,3 +56,4 @@ class RobotTelemetry(messages.Snapshot):
   topo_node_count: int = 0
   topo_current_node: int = -1
   topo_open_exits: int = 0
+  topo_goal_node: int = -1

@@ -68,7 +68,13 @@ class ViewerPlugin(plugin.ViewerPlugin):
         self.left_rad_s = 0.0
         self.right_rad_s = 0.0
         self._send_drive()
-        self.viewer.send_to_sim(user_messages.ResetRobotEvent())
+        self.viewer.send_to_sim(user_messages.ResetRobotEvent(keep_topo=False))
+      imgui.SameLine()
+      if imgui.Button('Reset (Keep Topo)'):
+        self.left_rad_s = 0.0
+        self.right_rad_s = 0.0
+        self._send_drive()
+        self.viewer.send_to_sim(user_messages.ResetRobotEvent(keep_topo=True))
 
       imgui.Separator()
 
@@ -144,8 +150,9 @@ class ViewerPlugin(plugin.ViewerPlugin):
       )
       if t.topo_node_count > 0:
         cur_str = f'#{t.topo_current_node}' if t.topo_current_node >= 0 else 'mid-edge'
+        goal_str = f' | Goal: #{t.topo_goal_node}' if t.topo_goal_node >= 0 else ''
         imgui.TextUnformatted(
-            f'Topo Graph: {t.topo_node_count} nodes | Current: {cur_str} | Open exits: {t.topo_open_exits}'
+            f'Topo Graph: {t.topo_node_count} nodes | Current: {cur_str} | Open exits: {t.topo_open_exits}{goal_str}'
         )
     finally:
       imgui.End()
