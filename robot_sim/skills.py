@@ -2543,11 +2543,15 @@ def advance_segment(
                 return None
             p_rf = probe_st["sensors"]["rangefinders_m"]
             min_f = min(float(p_rf["left"]), float(p_rf["center"]), float(p_rf["right"]))
+            p_l90 = float(p_rf.get("left90", 3.0))
+            p_r90 = float(p_rf.get("right90", 3.0))
             if motion == "dynamic":
-                if min_f < 0.34 or obs_sum["est_dist_m"] < 0.26:
-                    p_l90 = float(p_rf.get("left90", 3.0))
-                    p_r90 = float(p_rf.get("right90", 3.0))
-                    back_m = -0.05 if min(p_l90, p_r90) > 0.75 else -0.10
+                in_open = min(p_l90, p_r90) > 0.75
+                eff_clear = min(min_f, float(obs_sum["est_dist_m"]))
+                if (in_open and (min_f < 0.34 or obs_sum["est_dist_m"] < 0.26)) or (
+                    not in_open and eff_clear < 0.34
+                ):
+                    back_m = -0.05 if in_open else -max(0.10, min(0.18, 0.36 - eff_clear))
                     probe_st = closed_loop_move(
                         call_fn,
                         meters=back_m,
@@ -2557,6 +2561,15 @@ def advance_segment(
                         release_stop=True,
                     )["after_status"]
                 return _finish_result("dynamic_gate_ahead", probe_st, obstacle=obs_sum, settle=True)
+            in_corridor_with_side = min(p_l90, p_r90) <= 0.52 and max(p_l90, p_r90) > 0.75
+            on_open_side = (
+                (obs_sum["offset_x"] < -0.25 and p_l90 > 0.75)
+                or (obs_sum["offset_x"] > 0.25 and p_r90 > 0.75)
+            )
+            if in_corridor_with_side and on_open_side and min_f >= 0.52 and obs_sum["est_dist_m"] > 0.55:
+                if obs_sum["color"]:
+                    ignored_static_colors.add(obs_sum["color"])
+                return None
             # Vật cản tĩnh: chỉ báo khi nằm ngay trước đường tiến hoặc cận sườn mũi; ghi nhớ tạm trong lần gọi này nếu đứng ngoài mép
             if min_f < 0.65 or (obs_sum["est_dist_m"] <= 0.78 and abs(obs_sum["offset_x"]) < 0.78):
                 return _finish_result("static_obstacle_ahead", probe_st, obstacle=obs_sum, settle=True)
@@ -2922,12 +2935,16 @@ def cross_dynamic_gate(call_fn: BridgeCall, timeout_s: float = 12.0) -> dict:
 
         rf_now = st["sensors"]["rangefinders_m"]
         cur_obs = st.get("vision", {}).get("obstacles", [])
-        if min(float(rf_now["left"]), float(rf_now["center"]), float(rf_now["right"])) < 0.34 or any(
-            _estimate_obs_cam_dist_m(o) < 0.26 for o in cur_obs
+        min_f_now = min(float(rf_now["left"]), float(rf_now["center"]), float(rf_now["right"]))
+        min_obs_z = min((_estimate_obs_cam_dist_m(o) for o in cur_obs), default=3.0)
+        n_l90 = float(rf_now.get("left90", 3.0))
+        n_r90 = float(rf_now.get("right90", 3.0))
+        in_open_gate = min(n_l90, n_r90) > 0.75
+        eff_clear_now = min(min_f_now, min_obs_z)
+        if (in_open_gate and (min_f_now < 0.34 or min_obs_z < 0.26)) or (
+            not in_open_gate and eff_clear_now < 0.28
         ):
-            n_l90 = float(rf_now.get("left90", 3.0))
-            n_r90 = float(rf_now.get("right90", 3.0))
-            back_m = -0.05 if min(n_l90, n_r90) > 0.75 else -0.10
+            back_m = -0.05 if in_open_gate else -max(0.08, min(0.16, 0.34 - eff_clear_now))
             st = closed_loop_move(
                 call_fn,
                 meters=back_m,

@@ -1262,3 +1262,108 @@ def test_minor_polish_open_space_repass_dock_obstacle_hop_and_tight_budget(tmp_p
     res_budget = _run_sim(max_dist_val=0.96, obs_on_north=False)
     assert res_budget["event"] == "max_dist"
     assert res_budget["route_progress"]["remaining"] == ["N"]
+
+
+def test_corridor_side_branch_static_ignored_and_dynamic_backup_proportional():
+    """Corridor side-branch obstacle doesn't halt before junction, and tight moving gate triggers proportional backup (0.14-0.18m)."""
+    from robot_sim.skills import advance_segment
+
+    # 1) Static obstacle in open left side-branch of a corridor -> ignored so robot reaches junction/corner;
+    #    centered or open-space obstacle still triggers static_obstacle_ahead.
+    def _run_static_check(*, rf_init: dict, offset_x: float):
+        st_state = {"t": 0.5, "x": 0.0, "odom": 0.0, "stopped": False}
+
+        def call_fn(path: str, method: str, body: dict | None = None):
+            if path == "/wheels" and body:
+                lw, rw = float(body.get("left", 0.0)), float(body.get("right", 0.0))
+                dt = 0.08
+                st_state["t"] += dt
+                v = 0.5 * (lw + rw) * 0.05
+                st_state["x"] += v * dt
+                st_state["odom"] += abs(v) * dt
+                return {"ok": True}
+            if path == "/stop":
+                st_state["stopped"] = True
+                return {"stopped": True, "sim_time": round(st_state["t"], 3)}
+            # Advance a bit then hit front wall at x >= 0.45 so advance_segment terminates cleanly if ignored
+            rf = dict(rf_init)
+            if st_state["x"] >= 0.45:
+                rf["center"] = 0.25
+                obs = []
+            else:
+                obs = [{"color": "blue", "offset_x": offset_x, "side": "left" if offset_x < 0 else "center", "area_pct": 4.67, "v_span": 0.246}]
+            return {
+                "sim_time": round(st_state["t"], 3),
+                "moving": False,
+                "sensors": {
+                    "rangefinders_m": rf,
+                    "gyro_yaw_deg": 0.0,
+                    "odom_dist_m": round(st_state["odom"], 4),
+                    "odom_x_m": round(st_state["x"], 4),
+                    "odom_y_m": 0.0,
+                    "forward_speed_m_s": 0.0,
+                    "yaw_rate_rad_s": 0.0,
+                },
+                "vision": {"target_visible": False, "target": None, "obstacles": obs},
+            }
+
+        return advance_segment(call_fn, max_dist=1.2)
+
+    rf_side_open = {"left": 0.83, "center": 0.67, "right": 0.72, "left90": 1.32, "right90": 0.34, "left120": 0.85, "right120": 0.38}
+    res_side = _run_static_check(rf_init=rf_side_open, offset_x=-0.32)
+    assert res_side["event"] != "static_obstacle_ahead"
+
+    res_center = _run_static_check(rf_init=rf_side_open, offset_x=0.0)
+    assert res_center["event"] == "static_obstacle_ahead"
+
+    rf_open_space = {"left": 0.83, "center": 0.67, "right": 0.72, "left90": 1.50, "right90": 1.50, "left120": 1.50, "right120": 1.50}
+    res_open = _run_static_check(rf_init=rf_open_space, offset_x=-0.32)
+    assert res_open["event"] == "static_obstacle_ahead"
+
+    # 2) Close moving gate in narrow corridor (est_dist_m ~ 0.19 < 0.20, min_f = 0.17) -> backs up 0.14m < |back_m| <= 0.18m
+    dyn_state = {"t": 0.5, "x": 0.0, "odom": 0.0, "v": 0.0, "polls": 0, "backup_m": 0.0}
+
+    def dyn_call(path: str, method: str, body: dict | None = None):
+        if path == "/wheels" and body:
+            lw, rw = float(body.get("left", 0.0)), float(body.get("right", 0.0))
+            dt = 0.02
+            dyn_state["t"] += dt
+            v = 0.5 * (lw + rw) * 0.05
+            dyn_state["v"] = v
+            dx = v * dt
+            dyn_state["x"] += dx
+            dyn_state["odom"] += dx
+            if dx < 0:
+                dyn_state["backup_m"] += abs(dx)
+            return {"ok": True}
+        if path == "/stop":
+            dyn_state["v"] = 0.0
+            return {"stopped": True, "sim_time": round(dyn_state["t"], 3)}
+        dyn_state["polls"] += 1
+        # Simulate moving obstacle shifting offset_x across polls so _probe_front_obstacle_motion classifies "dynamic"
+        ox = 0.0 if dyn_state["polls"] <= 1 else 0.08
+        # During backup, x decreases from 0.0 toward -0.18 so min_f rises linearly from 0.17
+        cur_min_f = min(0.50, max(0.17, 0.17 - dyn_state["x"]))
+        return {
+            "sim_time": round(dyn_state["t"], 3),
+            "moving": abs(dyn_state["v"]) > 1e-3,
+            "sensors": {
+                "rangefinders_m": {"left": cur_min_f, "center": cur_min_f, "right": 0.25, "left90": 0.40, "right90": 0.40, "left120": 0.45, "right120": 0.45},
+                "gyro_yaw_deg": 0.0,
+                "odom_dist_m": round(dyn_state["odom"], 4),
+                "odom_x_m": round(dyn_state["x"], 4),
+                "odom_y_m": 0.0,
+                "forward_speed_m_s": round(dyn_state["v"], 4),
+                "yaw_rate_rad_s": 0.0,
+            },
+            "vision": {
+                "target_visible": False,
+                "target": None,
+                "obstacles": [{"color": "blue", "offset_x": ox, "side": "center", "area_pct": 42.0, "v_span": 0.90}],
+            },
+        }
+
+    res_dyn = advance_segment(dyn_call, max_dist=1.2)
+    assert res_dyn["event"] == "dynamic_gate_ahead"
+    assert 0.14 < dyn_state["backup_m"] <= 0.22
+

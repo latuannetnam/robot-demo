@@ -403,7 +403,7 @@ class SimPlugin(plugin.SimPlugin):
         )
 
     self._publish_telemetry(self._data)
-    if pending is not None:
+    if pending is not None and pending[0] is not None:
       resp_q = pending[0]
       try:
         resp_q.put((200, {'ok': True, 'data': self.api_get_status(include_vision=False)}))
@@ -614,9 +614,11 @@ class SimPlugin(plugin.SimPlugin):
     self.right_rad_s = 0.0
     self._command_deadline = None
     self.reset_requested = True
-    # Placeholder queue; replaced in _drain_http_queue with the caller's resp_q.
-    self._pending_reload_resp = (queue.Queue(), validated_target, keep_prev, prev_target_pos)
+    # Placeholder tuple; replaced in _drain_http_queue with the caller's resp_q if reload is deferred.
+    self._pending_reload_resp = (None, validated_target, keep_prev, prev_target_pos)
     self.handle.reload()
+    if self._pending_reload_resp is None:
+      return self.api_get_status(include_vision=False)
     return {}
 
   def _read_rf_with_hit(self, key: str) -> tuple[float, bool]:
@@ -828,7 +830,11 @@ class SimPlugin(plugin.SimPlugin):
     self._model = event.model
     self._data = event.data
     self._drain_http_queue()
-    if self._pending_reload_resp is not None:
+    if (
+        self._pending_reload_resp is not None
+        or self._model is not event.model
+        or self._data is not event.data
+    ):
       return
 
     if self._command_deadline is not None and event.data.time >= self._command_deadline:
