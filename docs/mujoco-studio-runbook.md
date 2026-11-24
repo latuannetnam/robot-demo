@@ -64,15 +64,17 @@ Mọi lệnh `robot_ctl.py` đều chạy qua `.\.venv\Scripts\python.exe` và k
 #    Mode A: --max-duration 360 | Mode C: --max-duration 480 | Mode B: --max-duration 900
 .\.venv\Scripts\python.exe robot_ctl.py telemetry record --hz 10 --max-duration 480
 
-# 3. Chạy thử lệnh System 1 (Mode C hybrid-brain)
+# 3. Chạy thử lệnh System 1 (Mode C hybrid-brain: Đơn chặng, Khứ hồi & Hai lượt)
 .\.venv\Scripts\python.exe robot_ctl.py topo show
 .\.venv\Scripts\python.exe robot_ctl.py go --cardinal E --max-dist 6.0 --speed 0.55
+.\.venv\Scripts\python.exe robot_ctl.py go --route W,S,N,E --stop-at-node 0 --speed 0.55
+.\.venv\Scripts\python.exe robot_ctl.py reset --keep-topo --vision
 
 # 4. Dừng hộp đen và xuất bảng điểm JSON
 .\.venv\Scripts\python.exe robot_ctl.py telemetry stop
 ```
 
-> **Studio Topo HUD:** Khi Mode C hoạt động (`captures/.topo_state.json` được ghi bởi `robot_ctl.py`), panel UI bên phải trong MuJoCo Studio tự động hiển thị dòng `Topo Graph: N nodes | current=#id | open=K` (đồng bộ thụ động `<= 2 Hz` qua `RobotTelemetry`, tự xóa về `0` khi reset/reload).
+> **Studio Topo HUD & Reset (Keep Topo):** Khi Mode C hoạt động (`captures/.topo_state.json`), panel UI bên phải trong MuJoCo Studio tự động hiển thị dòng `Topo Graph: N nodes | Current: #id | Open exits: K | Goal: #G` (đồng bộ thụ động `<= 2 Hz` qua `RobotTelemetry`). Nút **`Reset Robot Spawn`** xóa trắng bản đồ, còn nút **`Reset (Keep Topo)`** đặt lại xe về vạch xuất phát nhưng giữ nguyên bản đồ đã học (xóa `visits = 0`) để chạy Lượt 2 Speed-run ngay trên UI.
 
 ---
 

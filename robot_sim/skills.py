@@ -2595,7 +2595,7 @@ def advance_segment(
                 float(st["sensors"].get("odom_x_m", 0.0)) - init_tx,
                 float(st["sensors"].get("odom_y_m", 0.0)) - init_ty,
             )
-            if d0_target_node <= 0.18:
+            if d0_target_node <= 0.10:
                 stopped_cleanly = True
                 return _finish_result("arrived_node", st, settle=True)
         else:
@@ -2754,8 +2754,8 @@ def advance_segment(
                     float(st["sensors"].get("odom_y_m", 0.0)) - float(_target_odom_xy[1]),
                 )
                 if (moved >= 0.12 or d0_target_node <= 0.25) and (
-                    cur_d_target_node <= 0.18
-                    or (cur_d_target_node <= 0.32 and cur_d_target_node > best_d_target_node + 0.015)
+                    cur_d_target_node <= 0.08
+                    or (cur_d_target_node <= 0.28 and cur_d_target_node > best_d_target_node + 0.012)
                 ):
                     stopped_cleanly = True
                     return _finish_result("arrived_node", st, settle=True)
@@ -3451,6 +3451,7 @@ def go_to_decision(
                 return blocked_res, active_topo.observe_status(hop_st), hop_st, 0.0, 0, []
 
         active_topo.begin_leg(hop_st)
+        hop_start_node = active_topo.current_node
 
         rem = float(hop_max_dist)
         hop_moved = 0.0
@@ -3499,8 +3500,16 @@ def go_to_decision(
             end_sens = hop_st["sensors"]
             end_x = float(end_sens.get("odom_x_m", 0.0))
             end_y = float(end_sens.get("odom_y_m", 0.0))
-            if active_topo.nearest_existing_node(end_x, end_y, radius_m=NODE_MATCH_RADIUS_M) is not None:
-                break
+            matched_l = active_topo.nearest_existing_node(end_x, end_y, radius_m=NODE_MATCH_RADIUS_M)
+            if matched_l is not None:
+                is_self_near = matched_l == hop_start_node and hop_moved < 0.80
+                is_unseen_goal_corner = (
+                    not ignore_target_ready
+                    and active_topo.nodes[matched_l].get("kind") == "goal"
+                    and not hop_st.get("vision", {}).get("target_visible")
+                )
+                if not is_self_near and not is_unseen_goal_corner:
+                    break
 
             branches = list(seg_res["open_branches"])
             if branches not in (["left"], ["right"]):
@@ -3611,6 +3620,7 @@ def go_to_decision(
                         hop_target_xy = (float(nx), float(ny))
                         is_intermediate_wp = True
 
+            hop_start_id = active_topo.current_node
             hop_res, topo_snap, cur_st, h_moved, h_segs, h_turns = _run_single_hop(
                 cur_st,
                 hop_target_deg=cardinal_to_deg(step_card),
@@ -3631,15 +3641,25 @@ def go_to_decision(
                 h_event = "junction"
                 last_seg_res = {**hop_res, "event": "junction"}
 
+            stalled_at_start = (
+                hop_start_id is not None
+                and topo_snap["current_node"] == hop_start_id
+                and h_moved < 0.80
+            )
             if is_last:
-                route_completed = num_steps if (topo_snap["current_node"] is not None or h_event in ("target_ready", "arrived_node")) else idx
+                route_completed = (
+                    num_steps
+                    if (not stalled_at_start and (topo_snap["current_node"] is not None or h_event in ("target_ready", "arrived_node")))
+                    else idx
+                )
                 break
 
             if (
-                h_event in ("dynamic_gate_ahead", "static_obstacle_ahead", "target_ready", "arrived_node", "dead_end", "max_dist")
+                stalled_at_start
+                or h_event in ("dynamic_gate_ahead", "static_obstacle_ahead", "target_ready", "arrived_node", "dead_end", "max_dist")
                 or topo_snap["current_node"] is None
             ):
-                route_completed = idx if topo_snap["current_node"] is None else (idx + 1)
+                route_completed = idx if (stalled_at_start or topo_snap["current_node"] is None) else (idx + 1)
                 break
             route_completed = idx + 1
 

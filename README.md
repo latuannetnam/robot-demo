@@ -81,9 +81,12 @@ uv run python robot_ctl.py reset --target-x -1.2 --target-y 1.0 --vision
 .venv\Scripts\python.exe robot_ctl.py cross-gate --timeout 12.0
 .venv\Scripts\python.exe robot_ctl.py dock --stop-distance 0.25
 
-# 10c. Các công cụ System 1 + Đồ thị Odometry khách quan cho chế độ Hybrid-Brain (Mode C)
+# 10c. Các công cụ System 1 + Đồ thị Odometry khách quan cho chế độ Hybrid-Brain (Mode C — Đơn chặng, Khứ hồi & Hai lượt)
 .venv\Scripts\python.exe robot_ctl.py topo show
 .venv\Scripts\python.exe robot_ctl.py go --cardinal E --max-dist 6.0 --speed 0.55
+.venv\Scripts\python.exe robot_ctl.py go --route W,S,N,N --speed 0.55
+.venv\Scripts\python.exe robot_ctl.py go --route W,S,N,E --stop-at-node 0 --speed 0.55
+.venv\Scripts\python.exe robot_ctl.py reset --keep-topo --vision
 .venv\Scripts\python.exe robot_ctl.py topo reset
 
 # 11. Xem danh sách 6 bản đồ địa hình chuẩn và chuyển đổi nóng ngay trên cửa sổ 3D đang mở!

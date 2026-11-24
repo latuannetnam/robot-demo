@@ -105,6 +105,10 @@ def test_hybrid_brain_mode_c_docs_driver_prompt_and_studio_messages():
         "loop_closed",
         "static_obstacle_ahead",
         "event == \"max_dist\"",
+        "--route",
+        "--stop-at-node",
+        "arrived_node",
+        "route_blocked",
     ):
         assert kw in hybrid_text
 
@@ -118,6 +122,9 @@ def test_hybrid_brain_mode_c_docs_driver_prompt_and_studio_messages():
         "robot-driver-hybrid",
         "driver-hybrid-prompt.md",
         "--max-duration 480",
+        "reset --keep-topo",
+        "returned_to_start",
+        "return_efficiency",
     ):
         assert kw in skill_text
     for kw in ("Mode C", "hybrid-brain", "driver-hybrid-prompt.md", "topo.py", "go_to_decision"):

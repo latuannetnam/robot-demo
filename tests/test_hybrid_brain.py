@@ -1090,3 +1090,90 @@ def test_go_to_decision_route_validation_anti_overshoot_blocked_hop_and_stop_at_
     res_os = go_to_decision(call_os, stop_at_node=0, topo=topo_os)
     assert res_os["event"] == "arrived_node"
     assert math.hypot(st_os["x"], st_os["y"]) <= 0.22
+
+
+def _shortest_explored_route(topo_dict: dict, src_id: int, dst_id: int) -> list[str]:
+    """System 2 test helper: Dijkstra shortest cardinal port sequence over explored edges using dist_m."""
+    import heapq
+
+    nodes = {int(n["id"]): n for n in topo_dict["nodes"]}
+    pq: list[tuple[float, int, list[str]]] = [(0.0, src_id, [])]
+    best: dict[int, float] = {src_id: 0.0}
+    while pq:
+        cost, u, path = heapq.heappop(pq)
+        if u == dst_id:
+            return path
+        if cost > best.get(u, float("inf")) + 1e-9:
+            continue
+        for port, info in nodes[u]["exits"].items():
+            if info.get("state") == "explored" and info.get("to_node") is not None:
+                v = int(info["to_node"])
+                w = float(info.get("dist_m") or 1.0)
+                nc = cost + max(0.05, w)
+                if nc < best.get(v, float("inf")) - 1e-9:
+                    best[v] = nc
+                    heapq.heappush(pq, (nc, v, path + [port]))
+    raise AssertionError(f"No explored path from {src_id} to {dst_id} in {topo_dict}")
+
+
+def test_hybrid_brain_direction_a_return_to_home_and_direction_b_speedrun_on_maze_b():
+    """Task 5 E2E: headless MuJoCo maze_b proves Direction A (Explore -> Dock -> Return-to-Home Node #0) and Direction B (reset_for_repass -> 1-command Speed-run to Goal)."""
+    import math
+
+    def _driver(call_fn, out: dict) -> None:
+        topo = TopologicalOdometer(auto_persist=False)
+        snap = topo.observe_status(call_fn("/status?vision=1", "GET"))
+        next_card: str | None = _choose_next_cardinal_from_topo(snap)
+        dock_res = None
+
+        # Pass 1: Blind exploration to green target
+        for _ in range(14):
+            res = go_to_decision(call_fn, cardinal=next_card, max_dist=6.0, speed_m_s=0.55, topo=topo)
+            next_card = None
+            if res["event"] == "target_ready":
+                dock_res = dock_target(call_fn, stop_distance=0.25)
+                assert dock_res["reached"] is True
+                snap = topo.record_dock(dock_res["moved_m"], dock_res["after_status"], reached=True)
+                break
+            elif res["topo"]["current_node"] is not None:
+                next_card = _choose_next_cardinal_from_topo(res["topo"])
+
+        assert dock_res is not None and dock_res["reached"] is True
+        goal_id = snap["current_node"]
+        assert goal_id is not None and snap["nodes"][goal_id]["kind"] == "goal"
+        out["pass1_odom"] = float(dock_res["after_status"]["sensors"]["odom_dist_m"])
+
+        # Direction A: Return-to-Home to Node #0 via single go --route ... --stop-at-node 0
+        home_route = _shortest_explored_route(snap, goal_id, 0)
+        assert len(home_route) >= 2
+        ret_res = go_to_decision(call_fn, route=home_route, stop_at_node=0, speed_m_s=0.55, topo=topo)
+        out["return_res"] = ret_res
+        ret_st = call_fn("/status", "GET")
+        out["return_world_err_m"] = math.hypot(
+            float(ret_st["sensors"]["odom_x_m"]),
+            float(ret_st["sensors"]["odom_y_m"]),
+        )
+        out["return_dbg_after"] = call_fn("/status?vision=1", "GET")
+
+        # Direction B: Reset robot spawn while keeping learned Topo map -> Pass 2 Speed-run!
+        reset_st = call_fn("/reset", "POST", {})
+        snap_p2 = topo.reset_for_repass(reset_st, target_changed=False)
+        assert snap_p2["current_node"] == 0
+        goal_nodes = [int(n["id"]) for n in snap_p2["nodes"] if n["kind"] == "goal"]
+        assert len(goal_nodes) == 1
+        speed_route = _shortest_explored_route(snap_p2, 0, goal_nodes[0])
+        p2_go = go_to_decision(call_fn, route=speed_route, speed_m_s=0.55, topo=topo)
+        assert p2_go["event"] == "target_ready"
+        p2_dock = dock_target(call_fn, stop_distance=0.25)
+        out["pass2_go"] = p2_go
+        out["pass2_dock"] = p2_dock
+        out["pass2_odom"] = float(p2_dock["after_status"]["sensors"]["odom_dist_m"])
+
+    result = _run_headless_episode("maze_b", _driver)
+    assert result["return_res"]["event"] == "arrived_node"
+    assert result["return_res"]["topo"]["current_node"] == 0
+    assert result["return_world_err_m"] <= 0.35
+    assert result["pass2_dock"]["reached"] is True
+    assert result["pass2_odom"] <= 9.0
+    assert result["pass2_odom"] < result["pass1_odom"] * 0.55
+    assert result["raw_debug"]["contact_count"] == 0
