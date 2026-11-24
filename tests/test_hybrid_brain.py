@@ -1177,3 +1177,88 @@ def test_hybrid_brain_direction_a_return_to_home_and_direction_b_speedrun_on_maz
     assert result["pass2_odom"] <= 9.0
     assert result["pass2_odom"] < result["pass1_odom"] * 0.55
     assert result["raw_debug"]["contact_count"] == 0
+
+
+def test_minor_polish_open_space_repass_dock_obstacle_hop_and_tight_budget(tmp_path: Path):
+    """Minor #1-#3 regression tests: no double-count on Pass-2 open_space dock, obstacle-aware route pre-check, and max_dist on tight inter-hop budget."""
+    import math
+    from robot_sim.skills import go_to_decision
+
+    # Minor #1: Pass-2 open_space finish_go("target_ready") already matched goal_id -> record_dock must NOT double-count visits!
+    topo = TopologicalOdometer("http://127.0.0.1:8765", state_path=tmp_path / ".m1.json")
+    rf_open = {"left": 2.0, "center": 2.5, "right": 2.0, "left90": 1.8, "right90": 1.8}
+    topo.observe_status(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_open))
+    topo.begin_leg(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_open))
+    topo.finish_go("target_ready", 1.5, _mk_status(sim_time=2.0, x=1.5, y=0.0, odom_dist=1.5, yaw_deg=0.0, rf=rf_open), in_corridor=False)
+    topo.record_dock(0.3, _mk_status(sim_time=2.5, x=1.8, y=0.0, odom_dist=1.8, yaw_deg=0.0, rf={"left": 1.2, "center": 0.26, "right": 1.2, "left90": 1.8, "right90": 1.8}), reached=True)
+
+    # Pass 2 repass reset -> drive straight to existing goal_id=1
+    topo.reset_for_repass(_mk_status(sim_time=0.0, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_open))
+    topo.begin_leg(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_open))
+    topo.finish_go("target_ready", 1.75, _mk_status(sim_time=2.0, x=1.75, y=0.0, odom_dist=1.75, yaw_deg=0.0, rf=rf_open), in_corridor=False)
+    snap2 = topo.record_dock(0.05, _mk_status(sim_time=2.2, x=1.80, y=0.0, odom_dist=1.80, yaw_deg=0.0, rf={"left": 1.2, "center": 0.26, "right": 1.2, "left90": 1.8, "right90": 1.8}), reached=True)
+    assert snap2["nodes"][0]["exits"]["E"]["out_visits"] == 1
+    assert snap2["nodes"][1]["exits"]["W"]["in_visits"] == 1
+
+    # Minor #2 & #3: Kinematic two-hop route ("E,N")
+    rf_cor = {"left": 0.9, "center": 2.0, "right": 0.9, "left90": 0.35, "right90": 0.35, "left120": 0.45, "right120": 0.45}
+    topo2 = TopologicalOdometer("http://127.0.0.1:8765", state_path=tmp_path / ".m23.json")
+    topo2.observe_status(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    topo2.begin_leg(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    topo2.finish_go("junction", 1.0, _mk_status(sim_time=2.0, x=1.0, y=0.0, odom_dist=1.0, yaw_deg=0.0, rf={"left": 0.9, "center": 0.32, "right": 0.9, "left90": 1.5, "right90": 0.35, "left120": 1.2, "right120": 0.45}), in_corridor=True)
+    topo2.reset_for_repass(_mk_status(sim_time=0.0, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+
+    def _run_sim(max_dist_val: float, obs_on_north: bool):
+        st = {"t": 0.5, "x": 0.0, "y": 0.0, "yaw": 0.0, "odom": 0.0}
+
+        def call_fn(path: str, method: str, body: dict | None = None):
+            if path == "/wheels" and body:
+                lw, rw = float(body.get("left", 0.0)), float(body.get("right", 0.0))
+                dt = 0.08
+                st["t"] += dt
+                v = 0.5 * (lw + rw) * 0.05
+                st["yaw"] += math.degrees((rw - lw) * 0.05 / 0.23) * dt
+                r = math.radians(st["yaw"])
+                st["x"] += v * math.cos(r) * dt
+                st["y"] += v * math.sin(r) * dt
+                st["odom"] += v * dt
+                return {"ok": True}
+            if path == "/stop":
+                return {"stopped": True, "sim_time": round(st["t"], 3)}
+            facing_e = abs(st["yaw"] % 360.0) < 45.0 or abs(st["yaw"] % 360.0) > 315.0
+            if facing_e:
+                rf = {"left": 0.9, "center": max(0.32, 1.32 - st["x"]), "right": 0.9, "left90": 1.5 if st["x"] >= 0.9 else 0.35, "right90": 0.35, "left120": 1.2 if st["x"] >= 0.9 else 0.45, "right120": 0.45}
+                vis = {"target_visible": False, "target": None, "obstacles": []}
+            else:
+                rf = {"left": 0.35, "center": 0.30, "right": 0.35, "left90": 0.35, "right90": 0.35, "left120": 0.45, "right120": 0.45}
+                vis = {
+                    "target_visible": False,
+                    "target": None,
+                    "obstacles": [{"color": "red", "offset_x": 0.0, "side": "center", "area_pct": 14.0, "v_span": 0.45}] if obs_on_north else [],
+                }
+            return {
+                "sim_time": round(st["t"], 3),
+                "moving": False,
+                "sensors": {
+                    "rangefinders_m": rf,
+                    "gyro_yaw_deg": round(st["yaw"], 3),
+                    "odom_dist_m": round(st["odom"], 4),
+                    "odom_x_m": round(st["x"], 4),
+                    "odom_y_m": round(st["y"], 4),
+                    "forward_speed_m_s": 0.0,
+                    "yaw_rate_rad_s": 0.0,
+                },
+                "vision": vis,
+            }
+
+        return go_to_decision(call_fn, route="E,N", max_dist=max_dist_val, topo=topo2)
+
+    # Minor #2: Colored obstacle right after turning North -> classified as static_obstacle_ahead (NOT route_blocked!)
+    res_obs = _run_sim(max_dist_val=6.0, obs_on_north=True)
+    assert res_obs["event"] == "static_obstacle_ahead"
+
+    # Minor #3: Explicit tight max_dist=0.96 exhausted right after hop 1 -> reports event == "max_dist" with remaining=["N"]
+    topo2.reset_for_repass(_mk_status(sim_time=0.0, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    res_budget = _run_sim(max_dist_val=0.96, obs_on_north=False)
+    assert res_budget["event"] == "max_dist"
+    assert res_budget["route_progress"]["remaining"] == ["N"]

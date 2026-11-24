@@ -3435,6 +3435,7 @@ def go_to_decision(
             if (
                 _is_front_blocked(rf_chk)
                 and float(rf_chk["center"]) < 0.42
+                and not hop_st.get("vision", {}).get("obstacles")
                 and (ignore_target_ready or not _is_target_ready_for_dock(hop_st))
             ):
                 blocked_res = {
@@ -3598,6 +3599,8 @@ def go_to_decision(
             is_last = idx == (num_steps - 1)
             rem_budget = max(0.0, total_budget - total_moved_m)
             if idx > 0 and rem_budget <= 0.05:
+                if last_seg_res is not None:
+                    last_seg_res = {**last_seg_res, "event": "max_dist"}
                 break
             hop_budget = min(6.0, rem_budget) if num_steps > 1 else rem_budget
 

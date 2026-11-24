@@ -693,7 +693,7 @@ class TopologicalOdometer:
                 )
 
         # Trên sân mở, nếu pending_leg đã bị hủy do lách vật cản tĩnh, nối cạnh thẳng từ Node #0 tới Node #G
-        if self.pending_leg is None and self.is_open_space_start() and goal_id != 0:
+        if self.pending_leg is None and self.is_open_space_start() and goal_id != 0 and self.current_node != goal_id:
             sx, sy = float(self.nodes[0]["xy"][0]), float(self.nodes[0]["xy"][1])
             dx, dy = x - sx, y - sy
             vec_dist = round(math.hypot(dx, dy), 3)
