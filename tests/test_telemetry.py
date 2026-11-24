@@ -358,3 +358,91 @@ def test_telemetry_optimal_dfs_in_place_spins_yield_zero_redundant_revisits(tmp_
     assert s["redundant_revisit_count"] == 0
 
 
+def test_telemetry_round_trip_return_to_start_and_moving_guard(tmp_path: Path, monkeypatch):
+    import pytest
+    from robot_sim.telemetry import record_telemetry
+
+    out_json = tmp_path / "rt_telemetry.json"
+    stop_file = tmp_path / ".rt_stop"
+    # Outbound on maze_b (start=[0,0], ref=6.5, target=[1.6,1.6]):
+    # 1) Explore dead-end West (-0.4 -> -0.8) & backtrack East (-0.4 -> 0.0, yaw=0°)
+    # 2) Drive East -> North to target (1.2, 1.6), dock cleanly (moving=False, rf_c=0.27, offset_x=0.02)
+    # 3) Depart and return straight back to [0.08, -0.05] passing through hub in SAME East/West direction -> 0 redundant!
+    trace = [
+        # (moving, fwd_spd, xy, yaw_deg, tv, ox, rfc)
+        (False, 0.0, [0.00, 0.00], 180.0, False, None, 1.2),
+        (True,  0.4, [-0.40, 0.00], 180.0, False, None, 0.9),
+        (True,  0.4, [-0.80, 0.00], 180.0, False, None, 0.4),
+        (True,  0.4, [-0.40, 0.00],   0.0, False, None, 1.0),
+        (True,  0.4, [0.00,  0.00],   0.0, False, None, 1.2),  # backtrack East through (0,0)
+        (True,  0.4, [0.40,  0.00],   0.0, False, None, 1.2),
+        (True,  0.4, [0.80,  0.00],   0.0, False, None, 1.2),
+        (True,  0.4, [1.20,  0.00],  90.0, False, None, 1.2),
+        (True,  0.4, [1.20,  0.40],  90.0, False, None, 1.2),
+        (True,  0.4, [1.20,  0.80],  90.0, False, None, 1.2),
+        (True,  0.4, [1.20,  1.20],  90.0, False, None, 0.8),
+        (True,  0.4, [1.20,  1.60],   0.0, True,  0.02, 0.27),
+        (False, 0.0, [1.20,  1.60],   0.0, True,  0.02, 0.27),  # Docked!
+        # Return phase: straight back (2.8m total return)
+        (True,  0.4, [1.20,  1.20], -90.0, False, None, 1.2),
+        (True,  0.4, [1.20,  0.80], -90.0, False, None, 1.2),
+        (True,  0.4, [1.20,  0.40], -90.0, False, None, 1.2),
+        (True,  0.4, [1.20,  0.00], 180.0, False, None, 1.2),
+        (True,  0.4, [0.80,  0.00], 180.0, False, None, 1.2),
+        (True,  0.4, [0.40,  0.00], 180.0, False, None, 1.2),
+        (True,  0.4, [0.08, -0.05],   0.0, False, None, 1.2),  # same cell & yaw=0° as earlier backtrack -> MUST NOT count redundant!
+        (False, 0.0, [0.08, -0.05],   0.0, False, None, 1.2),
+    ]
+    idx = 0
+
+    def fake_fetch(_url: str, timeout: float = 4.0) -> dict:
+        nonlocal idx
+        m, spd, xy, yaw, tv, ox, rfc = trace[idx]
+        idx += 1
+        if idx >= len(trace):
+            stop_file.write_text("stop\n", encoding="utf-8")
+        return {
+            "sim_time": 0.2 * idx,
+            "moving": m,
+            "sensors": {"rangefinders_m": {"left": 1.0, "center": rfc, "right": 1.0}, "forward_speed_m_s": spd, "yaw_rate_rad_s": 0.0},
+            "vision": {"target_visible": tv, "target": {"offset_x": ox, "area_pct": 18.0} if tv else None, "obstacles": []},
+            "debug": {"arena": "maze_b", "robot_xy": xy, "robot_yaw_deg": yaw, "target_xy": [1.6, 1.6], "contact_count": 0},
+        }
+
+    monkeypatch.setattr("robot_sim.telemetry._fetch_raw_status", fake_fetch)
+    s = record_telemetry("http://127.0.0.1:8765", out_path=out_json, stop_flag_path=stop_file, hz=100.0)
+    assert s["goal_reached"] is False
+    assert s["goal_docked"] is True
+    assert s["returned_to_start"] is True
+    assert s["start_to_end_m"] <= 0.15
+    assert s["outbound_path_length_m"] > 4.0
+    assert s["return_path_length_m"] > 2.0
+    assert s["return_efficiency"] == pytest.approx(round(min(1.0, 6.5 / s["return_path_length_m"]), 3), abs=1e-3)
+    assert s["redundant_revisit_count"] == 0
+
+    # Moving guard: passing near start_xy while still moving=True at final sample -> returned_to_start is False
+    out_json2 = tmp_path / "rt_moving.json"
+    stop_file2 = tmp_path / ".rt_moving_stop"
+    trace_moving = trace[:-1]  # ends with moving=True at [0.08, -0.05]
+    idx2 = 0
+
+    def fake_fetch2(_url: str, timeout: float = 4.0) -> dict:
+        nonlocal idx2
+        m, spd, xy, yaw, tv, ox, rfc = trace_moving[idx2]
+        idx2 += 1
+        if idx2 >= len(trace_moving):
+            stop_file2.write_text("stop\n", encoding="utf-8")
+        return {
+            "sim_time": 0.2 * idx2,
+            "moving": m,
+            "sensors": {"rangefinders_m": {"left": 1.0, "center": rfc, "right": 1.0}, "forward_speed_m_s": spd, "yaw_rate_rad_s": 0.0},
+            "vision": {"target_visible": tv, "target": {"offset_x": ox, "area_pct": 18.0} if tv else None, "obstacles": []},
+            "debug": {"arena": "maze_b", "robot_xy": xy, "robot_yaw_deg": yaw, "target_xy": [1.6, 1.6], "contact_count": 0},
+        }
+
+    monkeypatch.setattr("robot_sim.telemetry._fetch_raw_status", fake_fetch2)
+    s2 = record_telemetry("http://127.0.0.1:8765", out_path=out_json2, stop_flag_path=stop_file2, hz=100.0)
+    assert s2["goal_docked"] is True
+    assert s2["returned_to_start"] is False
+
+

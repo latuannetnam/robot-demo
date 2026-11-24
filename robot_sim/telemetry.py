@@ -112,8 +112,12 @@ def record_telemetry(
     last_dir_cell: tuple[tuple[int, int], int] | None = None
     cell_last_path: dict[tuple[int, int], float] = {}
     dir_cell_last_path: dict[tuple[tuple[int, int], int], float] = {}
+    unique_cells_seen: set[tuple[int, int]] = set()
     backtrack_revisit_count = 0
     redundant_revisit_count = 0
+    goal_docked = False
+    outbound_path_length_m: float | None = None
+    return_phase_started = False
 
     first_sim_t: float | None = None
     last_sim_t: float | None = None
@@ -200,10 +204,14 @@ def record_telemetry(
                             reset_jumped = True
                             cell_last_path.clear()
                             dir_cell_last_path.clear()
+                            unique_cells_seen.clear()
                             last_cell = None
                             last_dir_cell = None
                             backtrack_revisit_count = 0
                             redundant_revisit_count = 0
+                            goal_docked = False
+                            outbound_path_length_m = None
+                            return_phase_started = False
                     prev_xy = [float(curr_xy[0]), float(curr_xy[1])]
                     end_xy = prev_xy
 
@@ -218,8 +226,37 @@ def record_telemetry(
                 if "target_xy" in dbg:
                     target_xy = [float(dbg["target_xy"][0]), float(dbg["target_xy"][1])]
 
+                vis = st.get("vision", {})
+                t_vis = bool(vis.get("target_visible", False))
+                t_obj = vis.get("target")
+                t_off = float(t_obj["offset_x"]) if (t_vis and isinstance(t_obj, dict)) else None
+
+                docked_now = (
+                    (not is_active)
+                    and t_vis
+                    and (t_off is not None)
+                    and abs(t_off) < 0.25
+                    and (0.15 <= rf_c <= 0.35)
+                )
+                if docked_now and not goal_docked:
+                    goal_docked = True
+                    outbound_path_length_m = path_length_m
+                elif (
+                    goal_docked
+                    and not return_phase_started
+                    and is_active
+                    and outbound_path_length_m is not None
+                    and (path_length_m - outbound_path_length_m) >= 0.15
+                ):
+                    return_phase_started = True
+                    cell_last_path.clear()
+                    dir_cell_last_path.clear()
+                    last_cell = None
+                    last_dir_cell = None
+
                 if isinstance(curr_xy, list) and len(curr_xy) == 2:
                     cell = (round(float(curr_xy[0]) / 0.50), round(float(curr_xy[1]) / 0.50))
+                    unique_cells_seen.add(cell)
                     if cell != last_cell:
                         if cell in cell_last_path and (path_length_m - cell_last_path[cell]) >= 0.80:
                             backtrack_revisit_count += 1
@@ -233,11 +270,6 @@ def record_telemetry(
                                 last_dir_cell = dcell
                             dir_cell_last_path[dcell] = path_length_m
                     cell_last_path[cell] = path_length_m
-
-                vis = st.get("vision", {})
-                t_vis = bool(vis.get("target_visible", False))
-                t_obj = vis.get("target")
-                t_off = float(t_obj["offset_x"]) if (t_vis and isinstance(t_obj, dict)) else None
 
                 final_rf_center = round(rf_c, 4)
                 final_target_visible = t_vis
@@ -348,6 +380,36 @@ def record_telemetry(
         if (reference_path_m is not None and goal_reached and path_length_m > 0.0)
         else None
     )
+    goal_docked_final = bool(goal_docked or goal_reached)
+    if goal_docked_final and outbound_path_length_m is None:
+        outbound_path_length_m = path_length_m
+    start_to_end_m = (
+        round(math.hypot(end_xy[0] - start_xy[0], end_xy[1] - start_xy[1]), 4)
+        if (start_xy is not None and end_xy is not None)
+        else None
+    )
+    return_path_length_m = (
+        round(max(0.0, path_length_m - outbound_path_length_m), 4)
+        if (goal_docked_final and outbound_path_length_m is not None and return_phase_started)
+        else (0.0 if goal_docked_final else None)
+    )
+    returned_to_start = bool(
+        goal_docked_final
+        and return_phase_started
+        and (not last_is_active)
+        and start_to_end_m is not None
+        and start_to_end_m <= 0.35
+    )
+    return_efficiency = (
+        round(min(1.0, reference_path_m / return_path_length_m), 3)
+        if (
+            returned_to_start
+            and reference_path_m is not None
+            and return_path_length_m is not None
+            and return_path_length_m > 0.0
+        )
+        else None
+    )
     summary = {
         "started_at": started_iso,
         "arena": arena_id,
@@ -362,7 +424,7 @@ def record_telemetry(
         "http_latency_ms": http_lat,
         "duty_cycle_pct": round((100.0 * active_samples) / sample_count, 1) if sample_count > 0 else 0.0,
         "command_burst_count": command_burst_count,
-        "unique_cells_visited": len(cell_last_path),
+        "unique_cells_visited": len(unique_cells_seen),
         "backtrack_revisit_count": backtrack_revisit_count,
         "redundant_revisit_count": redundant_revisit_count,
         "start_xy": start_xy,
@@ -370,13 +432,19 @@ def record_telemetry(
         "end_yaw_deg": end_yaw_deg,
         "target_xy": target_xy,
         "center_to_target_m": center_to_target_m,
+        "start_to_end_m": start_to_end_m,
         "path_length_m": round(path_length_m, 4),
+        "outbound_path_length_m": round(outbound_path_length_m, 4) if outbound_path_length_m is not None else None,
+        "return_path_length_m": return_path_length_m,
         "reference_path_m": reference_path_m,
         "path_efficiency": path_efficiency,
+        "return_efficiency": return_efficiency,
         "final_rf_center_m": final_rf_center,
         "final_target_visible": final_target_visible,
         "final_target_offset_x": final_target_offset_x,
         "goal_reached": goal_reached,
+        "goal_docked": goal_docked_final,
+        "returned_to_start": returned_to_start,
         "min_rangefinder_m": round(min_rf_m, 4) if sample_count > 0 else None,
         "near_collision_count": near_collision_count,
         "contact_count": contact_count,
