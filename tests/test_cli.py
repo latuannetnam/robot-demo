@@ -428,3 +428,64 @@ def test_cli_hybrid_go_topo_isolation_and_no_mode_ab_state_file(capsys, tmp_path
     assert out["mutex_rejected"] is True
     assert out["topo_reset"]["reset"] is True
     assert out["other_alive"] is True and out["self_alive"] is False
+
+
+def test_cli_go_route_dock_goal_and_reset_keep_topo(capsys, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(robot_ctl, "DEFAULT_TOPO_STATE_PATH", tmp_path / ".topo_state.json")
+    state_file = tmp_path / ".topo_state.json"
+
+    app = SimulationApp()
+    host, port = app.start_http_server(host="127.0.0.1", port=0)
+    url = f"http://{host}:{port}"
+    stop_evt = threading.Event()
+    out: dict = {}
+    err_holder: list[BaseException] = []
+
+    def worker():
+        try:
+            assert robot_ctl.main(["--url", url, "reset", "--target-x", "0.85", "--target-y", "0.0"]) == 0
+            capsys.readouterr()
+            assert robot_ctl.main(["--url", url, "topo", "show"]) == 0
+            capsys.readouterr()
+
+            assert robot_ctl.main(["--url", url, "go", "--route", "E", "--max-dist", "1.0", "--speed", "0.45"]) == 0
+            out["go_route"] = json.loads(capsys.readouterr().out)
+
+            assert robot_ctl.main(["--url", url, "dock", "--stop-distance", "0.25"]) == 0
+            out["dock"] = json.loads(capsys.readouterr().out)
+
+            # reset --keep-topo preserves learned goal node & zeroes visits
+            assert robot_ctl.main(["--url", url, "reset", "--keep-topo"]) == 0
+            out["reset_keep"] = json.loads(capsys.readouterr().out)
+
+            # default reset clears session file
+            assert robot_ctl.main(["--url", url, "reset"]) == 0
+            capsys.readouterr()
+            from robot_sim.topo import TopologicalOdometer
+
+            out["alive_after_plain_reset"] = TopologicalOdometer.has_active_session(url, state_path=state_file)
+        except BaseException as exc:
+            err_holder.append(exc)
+        finally:
+            stop_evt.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        while not stop_evt.is_set():
+            app.tick_headless(step_batch=10)
+            time.sleep(0.004)
+        t.join(timeout=25.0)
+    finally:
+        app.shutdown()
+
+    if err_holder:
+        raise err_holder[0]
+
+    assert "route_progress" in out["go_route"]
+    assert out["dock"]["reached"] is True
+    assert out["dock"]["topo"]["nodes"][out["dock"]["topo"]["current_node"]]["kind"] == "goal"
+    assert len(out["reset_keep"]["topo"]["nodes"]) >= 2
+    assert out["reset_keep"]["topo"]["current_node"] == 0
+    assert any(n["kind"] == "goal" for n in out["reset_keep"]["topo"]["nodes"])
+    assert out["alive_after_plain_reset"] is False

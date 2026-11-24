@@ -295,6 +295,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Góc hướng mục tiêu tùy chọn theo độ trong hệ quy chiếu khởi hành",
     )
+    go_dir.add_argument(
+        "--route",
+        type=str,
+        default=None,
+        help="Chuỗi hướng chính do System 2 lập kế hoạch, phân tách bằng dấu phẩy (ví dụ: W,S,N,N)",
+    )
+    p_go.add_argument(
+        "--stop-at-node",
+        type=int,
+        default=None,
+        help="ID nút đích trên đồ thị Topo cần căn dừng êm ở cuối chặng (ví dụ: 0 cho Return-to-Home)",
+    )
     p_go.add_argument("--max-dist", type=float, default=6.0, help="Tổng quãng đường tối đa của một lệnh go (mét, mặc định: 6.0)")
     p_go.add_argument("--speed", type=float, default=0.55, help="Tốc độ tiến hành lang (m/s, mặc định: 0.55)")
     p_go.add_argument("--step-dt", type=float, default=0.10, help="Chu kỳ điều khiển mỗi nhịp (giây, mặc định: 0.10)")
@@ -315,6 +327,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_reset.add_argument("--target-x", type=float, default=None, help="Tọa độ X mới của mục tiêu (-1.7..1.7)")
     p_reset.add_argument("--target-y", type=float, default=None, help="Tọa độ Y mới của mục tiêu (-1.7..1.7)")
     p_reset.add_argument("--vision", action="store_true", help="Kèm tóm tắt Edge Vision ngay sau khi reset")
+    p_reset.add_argument(
+        "--keep-topo",
+        action="store_true",
+        help="Giữ lại cấu trúc đồ thị Topo đã học cho Lượt 2 (chỉ xóa bộ đếm visits về 0)",
+    )
 
     p_arenas = sub.add_parser("arenas", help="Liệt kê danh sách các bản đồ địa hình chuẩn có sẵn")
     p_arenas.add_argument(
@@ -526,8 +543,11 @@ def main(argv: list[str] | None = None) -> int:
                 "after_status" in output
                 and TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
             ):
-                TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH).observe_status(
-                    output["after_status"]
+                topo_inst = TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
+                output["topo"] = topo_inst.record_dock(
+                    output.get("moved_m", 0.0),
+                    output["after_status"],
+                    reached=bool(output.get("reached", False)),
                 )
         elif args.command == "go":
             call_fn = lambda path, method="GET", payload=None: _call_bridge(args.url, path, method, payload)
@@ -542,6 +562,8 @@ def main(argv: list[str] | None = None) -> int:
                 max_chain=args.max_chain,
                 auto_chain=not args.no_chain,
                 topo=topo_inst,
+                route=args.route,
+                stop_at_node=args.stop_at_node,
             )
         elif args.command == "topo":
             if args.topo_action == "reset":
@@ -568,9 +590,16 @@ def main(argv: list[str] | None = None) -> int:
                 raise BridgeRequestError("Cần truyền cả --target-x lẫn --target-y khi đổi vị trí mục tiêu.")
             target_xy = [args.target_x, args.target_y] if args.target_x is not None else None
             res = _call_bridge(args.url, "/reset", "POST", {"target_xy": target_xy})
-            if TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH):
-                TopologicalOdometer.reset_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
             output = _strip_debug(res, keep_debug=False)
+            if TopologicalOdometer.has_active_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH):
+                if args.keep_topo:
+                    topo_inst = TopologicalOdometer(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
+                    output["topo"] = topo_inst.reset_for_repass(
+                        output,
+                        target_changed=(target_xy is not None),
+                    )
+                else:
+                    TopologicalOdometer.reset_session(args.url, state_path=DEFAULT_TOPO_STATE_PATH)
             if args.vision:
                 output["vision"] = _call_bridge(args.url, "/vision?camera=front_cam", "GET")
         elif args.command == "arenas":

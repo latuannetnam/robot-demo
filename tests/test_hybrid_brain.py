@@ -904,3 +904,166 @@ def test_dock_target_reports_moved_m():
     res_ok = dock_target(fake_dock_call, stop_distance=0.25)
     assert res_ok["reached"] is True
     assert res_ok["moved_m"] == pytest.approx(0.20, abs=0.01)
+
+
+def test_go_to_decision_route_validation_anti_overshoot_blocked_hop_and_stop_at_node(tmp_path: Path):
+    """Task 2: route validation, intermediate waypoint anti-overshoot braking, route_blocked, ignore target_ready on return, and open-space stop_at_node."""
+    import math
+    from robot_sim.skills import go_to_decision
+
+    dummy_st = _mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0)
+    topo_v = TopologicalOdometer("http://127.0.0.1:8765", state_path=tmp_path / ".v.json")
+    topo_v.observe_status(dummy_st)
+    for bad_kwargs in (
+        {"cardinal": "E", "route": "E,N"},
+        {"heading_deg": 0.0, "route": "E"},
+        {"route": ""},
+        {"route": "E,X"},
+        {"stop_at_node": -1},
+        {"stop_at_node": True},
+        {"stop_at_node": 99},
+    ):
+        with pytest.raises(ValueError):
+            go_to_decision(lambda p, m, b=None: dummy_st, topo=topo_v, **bad_kwargs)
+
+    # Helper stateful fake robot for pure kinematics unit verification
+    def _make_kinematic_world(
+        *,
+        x0: float,
+        y0: float,
+        yaw0: float,
+        rf_fn,
+        vis_fn=None,
+        t0: float = 1.0,
+        odom0: float = 0.0,
+    ):
+        state = {"t": t0, "x": x0, "y": y0, "yaw": yaw0, "odom": odom0}
+
+        def call_fn(path: str, method: str, body: dict | None = None):
+            if path == "/wheels" and body:
+                l_w = float(body.get("left", 0.0))
+                r_w = float(body.get("right", 0.0))
+                dt = 0.08
+                state["t"] += dt
+                v_lin = 0.5 * (l_w + r_w) * 0.05
+                w_yaw_deg = math.degrees((r_w - l_w) * 0.05 / 0.23)
+                state["yaw"] += w_yaw_deg * dt
+                rad = math.radians(state["yaw"])
+                dx = v_lin * math.cos(rad) * dt
+                dy = v_lin * math.sin(rad) * dt
+                state["x"] += dx
+                state["y"] += dy
+                state["odom"] += v_lin * dt
+                return {"ok": True}
+            if path == "/stop":
+                return {"stopped": True, "sim_time": round(state["t"], 3)}
+            rf = rf_fn(state)
+            vis = vis_fn(state) if vis_fn else {"target_visible": False, "target": None, "obstacles": []}
+            return {
+                "sim_time": round(state["t"], 3),
+                "moving": False,
+                "sensors": {
+                    "rangefinders_m": rf,
+                    "gyro_yaw_deg": round(state["yaw"], 3),
+                    "odom_dist_m": round(state["odom"], 4),
+                    "odom_x_m": round(state["x"], 4),
+                    "odom_y_m": round(state["y"], 4),
+                    "forward_speed_m_s": 0.0,
+                    "yaw_rate_rad_s": 0.0,
+                },
+                "vision": vis,
+            }
+
+        return state, call_fn
+
+    # 1. Multi-hop route="E,N" where Node #1=(1.0,0.0) has NO side-wall opening cue (anti-overshoot next_node_xy brakes at Node #1!)
+    topo_m = TopologicalOdometer("http://127.0.0.1:8765", state_path=tmp_path / ".m.json")
+    rf_cor = {"left": 0.9, "center": 2.0, "right": 0.9, "left90": 0.35, "right90": 0.35, "left120": 0.45, "right120": 0.45}
+    topo_m.observe_status(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    topo_m.begin_leg(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    topo_m.finish_go(
+        "junction",
+        1.0,
+        _mk_status(
+            sim_time=2.0,
+            x=1.0,
+            y=0.0,
+            odom_dist=1.0,
+            yaw_deg=0.0,
+            rf={"left": 0.9, "center": 1.8, "right": 0.9, "left90": 1.5, "right90": 0.35, "left120": 1.2, "right120": 0.45},
+        ),
+        in_corridor=True,
+    )
+    topo_m.begin_leg(_mk_status(sim_time=2.1, x=1.0, y=0.0, odom_dist=1.0, yaw_deg=90.0, rf=rf_cor))
+    topo_m.finish_go(
+        "junction",
+        1.0,
+        _mk_status(sim_time=4.0, x=1.0, y=1.0, odom_dist=2.0, yaw_deg=90.0, rf=rf_cor),
+        in_corridor=True,
+    )
+    topo_m.reset_for_repass(_mk_status(sim_time=0.0, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+
+    def _rf_multi(s):
+        # Corridor east with narrow walls even past (1,0) so ONLY next_node_xy stops hop 0 at (1,0)!
+        if abs(s["yaw"] % 360.0) < 45.0 or abs(s["yaw"] % 360.0) > 315.0:
+            return {"left": 0.9, "center": max(0.32, 2.5 - s["x"]), "right": 0.9, "left90": 0.35, "right90": 0.35, "left120": 0.45, "right120": 0.45}
+        return {"left": 0.9, "center": max(0.30, 1.32 - s["y"]), "right": 0.9, "left90": 0.35, "right90": 0.35, "left120": 0.45, "right120": 0.45}
+
+    st_m, call_m = _make_kinematic_world(x0=0.0, y0=0.0, yaw0=0.0, rf_fn=_rf_multi)
+    res_m = go_to_decision(call_m, route="E,N", stop_at_node=2, topo=topo_m)
+    assert res_m["event"] == "arrived_node"
+    assert res_m["route_progress"] == {
+        "requested": ["E", "N"],
+        "completed": 2,
+        "remaining": [],
+        "stop_at_node": 2,
+    }
+    assert math.hypot(st_m["x"] - 1.0, st_m["y"] - 1.0) <= 0.25
+
+    # 2. Blocked hop 2 ("N" is walled off at Node #1) -> stops with event == "route_blocked"
+    topo_m.reset_for_repass(_mk_status(sim_time=0.0, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+
+    def _rf_blocked(s):
+        if abs(s["yaw"] % 360.0) < 45.0 or abs(s["yaw"] % 360.0) > 315.0:
+            return {"left": 0.9, "center": max(0.32, 2.5 - s["x"]), "right": 0.9, "left90": 0.35, "right90": 0.35, "left120": 0.45, "right120": 0.45}
+        return {"left": 0.35, "center": 0.30, "right": 0.35, "left90": 0.35, "right90": 0.35, "left120": 0.45, "right120": 0.45}
+
+    _, call_blk = _make_kinematic_world(x0=0.0, y0=0.0, yaw0=0.0, rf_fn=_rf_blocked)
+    res_blk = go_to_decision(call_blk, route="E,N", topo=topo_m)
+    assert res_blk["event"] == "route_blocked"
+    assert res_blk["route_progress"]["completed"] == 1
+    assert res_blk["route_progress"]["remaining"] == ["N"]
+
+    # 3. Return from docked goal (target visible right in front) with route=["W"], stop_at_node=0 -> ignores target_ready
+    topo_ret = TopologicalOdometer("http://127.0.0.1:8765", state_path=tmp_path / ".ret.json")
+    topo_ret.observe_status(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    topo_ret.begin_leg(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    topo_ret.finish_go("target_ready", 1.0, _mk_status(sim_time=2.0, x=1.0, y=0.0, odom_dist=1.0, yaw_deg=0.0, rf=rf_cor), in_corridor=True)
+    topo_ret.record_dock(0.3, _mk_status(sim_time=2.5, x=1.3, y=0.0, odom_dist=1.3, yaw_deg=0.0, rf=rf_cor), reached=True)
+
+    st_ret, call_ret = _make_kinematic_world(
+        x0=1.3,
+        y0=0.0,
+        yaw0=0.0,
+        t0=2.6,
+        odom0=1.3,
+        rf_fn=lambda s: {"left": 0.9, "center": 0.27 if abs(s["yaw"]) < 45.0 else max(0.32, s["x"] + 0.35), "right": 0.9, "left90": 0.35, "right90": 0.35, "left120": 0.45, "right120": 0.45},
+        vis_fn=lambda s: {
+            "target_visible": abs(s["yaw"]) < 45.0,
+            "target": {"offset_x": 0.0, "side": "center", "area_pct": 18.0, "v_span": 0.6} if abs(s["yaw"]) < 45.0 else None,
+            "obstacles": [],
+        },
+    )
+    res_ret = go_to_decision(call_ret, route=["W"], stop_at_node=0, topo=topo_ret)
+    assert res_ret["event"] == "arrived_node"
+    assert res_ret["topo"]["current_node"] == 0
+    assert math.hypot(st_ret["x"], st_ret["y"]) <= 0.22
+
+    # 4. Open-space stop_at_node=0 auto-heading from (1.2, 0.4) back to (0, 0)
+    topo_os = TopologicalOdometer("http://127.0.0.1:8765", state_path=tmp_path / ".os.json")
+    rf_os = {"left": 2.5, "center": 2.5, "right": 2.5, "left90": 2.0, "right90": 2.0, "left120": 2.0, "right120": 2.0}
+    topo_os.observe_status(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_os))
+    st_os, call_os = _make_kinematic_world(x0=1.2, y0=0.4, yaw0=0.0, t0=2.0, odom0=1.3, rf_fn=lambda s: rf_os)
+    res_os = go_to_decision(call_os, stop_at_node=0, topo=topo_os)
+    assert res_os["event"] == "arrived_node"
+    assert math.hypot(st_os["x"], st_os["y"]) <= 0.22

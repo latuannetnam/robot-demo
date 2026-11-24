@@ -2407,6 +2407,8 @@ def advance_segment(
     step_dt: float = 0.10,
     *,
     _out_meta: dict | None = None,
+    _target_odom_xy: tuple[float, float] | None = None,
+    _ignore_target_ready: bool = False,
 ) -> dict:
     """Tiến thẳng một đoạn hành lang/sân mở hoàn toàn vô trạng thái và dừng ngay khi gặp sự kiện."""
     _require_finite(max_dist=max_dist, speed_m_s=speed_m_s, step_dt=step_dt)
@@ -2583,9 +2585,22 @@ def advance_segment(
             return _finish_result("target_ready", chk_st, settle=False)
 
         # Kiểm tra trước khi xuất phát (ưu tiên target_ready trước khi chưa có vật cản gần hơn)
-        if _is_target_ready_for_dock(st):
+        if not _ignore_target_ready and _is_target_ready_for_dock(st):
             stopped_cleanly = True
             return _finish_target_ready_checked(st, settle=True)
+
+        if _target_odom_xy is not None:
+            init_tx, init_ty = float(_target_odom_xy[0]), float(_target_odom_xy[1])
+            d0_target_node = math.hypot(
+                float(st["sensors"].get("odom_x_m", 0.0)) - init_tx,
+                float(st["sensors"].get("odom_y_m", 0.0)) - init_ty,
+            )
+            if d0_target_node <= 0.18:
+                stopped_cleanly = True
+                return _finish_result("arrived_node", st, settle=True)
+        else:
+            d0_target_node = float("inf")
+        best_d_target_node = d0_target_node
 
         obs_res = _check_obstacle_event(st)
         if obs_res is not None:
@@ -2613,7 +2628,7 @@ def advance_segment(
                 stopped_cleanly = True
                 return _finish_result("dynamic_gate_ahead", st, obstacle=wing_obs, settle=True)
 
-        if _is_target_ready_for_dock(st):
+        if not _ignore_target_ready and _is_target_ready_for_dock(st):
             stopped_cleanly = True
             return _finish_result("target_ready", st, settle=True)
 
@@ -2623,7 +2638,7 @@ def advance_segment(
                 if (do_settle or block_st.get("moving", False))
                 else block_st
             )
-            if _is_target_ready_for_dock(settled):
+            if not _ignore_target_ready and _is_target_ready_for_dock(settled):
                 return _finish_result("target_ready", settled, settle=False)
             obs_after = _check_obstacle_event(settled)
             if obs_after is not None:
@@ -2728,9 +2743,24 @@ def advance_segment(
                 stopped_cleanly = True
                 return obs_res
 
-            if _is_target_ready_for_dock(st):
+            if not _ignore_target_ready and _is_target_ready_for_dock(st):
                 stopped_cleanly = True
                 return _finish_target_ready_checked(st, settle=True)
+
+            cur_d_target_node = float("inf")
+            if _target_odom_xy is not None:
+                cur_d_target_node = math.hypot(
+                    float(st["sensors"].get("odom_x_m", 0.0)) - float(_target_odom_xy[0]),
+                    float(st["sensors"].get("odom_y_m", 0.0)) - float(_target_odom_xy[1]),
+                )
+                if (moved >= 0.12 or d0_target_node <= 0.25) and (
+                    cur_d_target_node <= 0.18
+                    or (cur_d_target_node <= 0.32 and cur_d_target_node > best_d_target_node + 0.015)
+                ):
+                    stopped_cleanly = True
+                    return _finish_result("arrived_node", st, settle=True)
+                if cur_d_target_node < best_d_target_node:
+                    best_d_target_node = cur_d_target_node
 
             # Kiểm tra tường phía trước -> dừng và trả về junction hoặc dead_end
             allow_graze_now = moved < 0.22 and not st.get("vision", {}).get("obstacles")
@@ -2771,7 +2801,7 @@ def advance_segment(
             if branch_center_odom_m is not None and (odom_m >= branch_center_odom_m - 0.02 or rf_c <= 0.36):
                 settled = _stop_and_settle(call_fn, include_vision=True)
                 branches = compute_open_branches(settled["sensors"]["rangefinders_m"])
-                if _is_target_ready_for_dock(settled):
+                if not _ignore_target_ready and _is_target_ready_for_dock(settled):
                     stopped_cleanly = True
                     return _finish_result("target_ready", settled, settle=False)
                 if "left" in branches or "right" in branches:
@@ -2797,6 +2827,8 @@ def advance_segment(
             front_clear = min(rf_c, rf_l + 0.22, rf_r + 0.22)
             cruise = speed_m_s if front_clear > 0.78 else max(0.22, speed_m_s * ((front_clear - 0.32) / 0.46))
             rem_limit = max_dist - moved
+            if _target_odom_xy is not None:
+                rem_limit = min(rem_limit, max(0.06, cur_d_target_node))
             if branch_center_odom_m is not None:
                 rem_limit = min(rem_limit, max(0.02, branch_center_odom_m - odom_m))
             if rem_limit < 0.24:
@@ -3309,8 +3341,10 @@ def go_to_decision(
     max_chain: int = 6,
     auto_chain: bool = True,
     topo=None,
+    route: list[str] | tuple[str, ...] | str | None = None,
+    stop_at_node: int | None = None,
 ) -> dict:
-    """System 1 gộp (Mode C): xoay khóa hướng, tiến phản xạ 20 Hz, tự lướt góc chữ L 1 lối đi và đồng bộ TopologicalOdometer."""
+    """System 1 gộp (Mode C): xoay khóa hướng, tiến phản xạ 20 Hz, tự lướt góc chữ L, thực thi chuỗi route và dừng đúng nút."""
     from robot_sim.topo import (
         NODE_MATCH_RADIUS_M,
         TopologicalOdometer,
@@ -3318,8 +3352,9 @@ def go_to_decision(
         cardinal_to_deg,
     )
 
-    if cardinal is not None and heading_deg is not None:
-        raise ValueError("Chỉ được truyền một trong hai tham số 'cardinal' hoặc 'heading_deg'.")
+    dir_args_count = sum(x is not None for x in (cardinal, heading_deg, route))
+    if dir_args_count > 1:
+        raise ValueError("Chỉ được truyền tối đa một trong ba tham số 'cardinal', 'heading_deg', hoặc 'route'.")
     _require_finite(max_dist=max_dist, speed_m_s=speed_m_s, step_dt=step_dt)
     if heading_deg is not None:
         _require_finite(heading_deg=heading_deg)
@@ -3332,148 +3367,330 @@ def go_to_decision(
         raise ValueError("Chu kỳ điều khiển 'step_dt' phải nằm trong đoạn [0.04, 1.0] giây.")
     if isinstance(max_chain, bool) or not isinstance(max_chain, int) or max_chain < 1:
         raise ValueError("Tham số 'max_chain' phải là số nguyên dương (>= 1).")
+    if stop_at_node is not None and (isinstance(stop_at_node, bool) or not isinstance(stop_at_node, int) or stop_at_node < 0):
+        raise ValueError("Tham số 'stop_at_node' phải là số nguyên không âm (>= 0).")
 
-    target_deg: float | None = None
+    route_steps: list[str] | None = None
+    if route is not None:
+        if isinstance(route, str):
+            raw_tokens = [tok.strip().upper() for tok in route.split(",") if tok.strip()]
+        elif isinstance(route, (list, tuple)):
+            raw_tokens = [str(tok).strip().upper() for tok in route if str(tok).strip()]
+        else:
+            raise ValueError("Tham số 'route' phải là chuỗi phân tách dấu phẩy hoặc danh sách hướng E/N/W/S.")
+        if not raw_tokens or len(raw_tokens) > 16:
+            raise ValueError("Tham số 'route' phải chứa từ 1 đến 16 hướng E/N/W/S.")
+        for tok in raw_tokens:
+            cardinal_to_deg(tok)
+        route_steps = raw_tokens
+
+    single_target_deg: float | None = None
     if cardinal is not None:
-        target_deg = cardinal_to_deg(cardinal)
+        single_target_deg = cardinal_to_deg(cardinal)
     elif heading_deg is not None:
-        target_deg = float(heading_deg)
+        single_target_deg = float(heading_deg)
 
     active_topo = topo if topo is not None else TopologicalOdometer(auto_persist=False)
 
-    # Bước 1: Quan sát nút hiện tại, xoay khóa hướng đầu lệnh (nếu yêu cầu), cập nhật lại tia cảm biến trước khi rời nút
     st = call_fn("/status?vision=1", "GET", None)
-    active_topo.observe_status(st)
+    topo_snap = active_topo.observe_status(st)
 
-    if target_deg is not None:
-        cur_yaw = float(st["sensors"]["gyro_yaw_deg"])
-        turn_deg = _wrap_angle_deg(target_deg - cur_yaw)
-        if abs(turn_deg) > 3.0:
-            st = closed_loop_turn(
+    stop_node_xy: tuple[float, float] | None = None
+    ignore_target_ready = False
+    if stop_at_node is not None:
+        if stop_at_node >= len(active_topo.nodes):
+            raise ValueError(
+                f"Nút stop_at_node={stop_at_node} chưa tồn tại trong đồ thị Topo (hiện có {len(active_topo.nodes)} nút)."
+            )
+        n_xy = active_topo.nodes[stop_at_node]["xy"]
+        stop_node_xy = (float(n_xy[0]), float(n_xy[1]))
+        ignore_target_ready = active_topo.nodes[stop_at_node].get("kind") != "goal"
+
+    def _run_single_hop(
+        cur_st: dict,
+        *,
+        hop_target_deg: float | None,
+        hop_max_dist: float,
+        target_odom_xy: tuple[float, float] | None,
+        check_blocked_before_drive: bool,
+    ) -> tuple[dict, dict, dict, float, int, list[str]]:
+        hop_st = cur_st
+        if hop_target_deg is not None:
+            cur_yaw = float(hop_st["sensors"]["gyro_yaw_deg"])
+            turn_deg = _wrap_angle_deg(hop_target_deg - cur_yaw)
+            if abs(turn_deg) > 3.0:
+                hop_st = closed_loop_turn(
+                    call_fn,
+                    degrees=turn_deg,
+                    max_speed_deg_s=200.0,
+                    tol_deg=1.2,
+                    include_vision=True,
+                    release_stop=False,
+                    fast_settle=True,
+                )["after_status"]
+                active_topo.observe_status(hop_st)
+
+        if check_blocked_before_drive:
+            rf_chk = hop_st["sensors"]["rangefinders_m"]
+            if (
+                _is_front_blocked(rf_chk)
+                and float(rf_chk["center"]) < 0.42
+                and (ignore_target_ready or not _is_target_ready_for_dock(hop_st))
+            ):
+                blocked_res = {
+                    "event": "route_blocked",
+                    "moved_m": 0.0,
+                    "open_branches": compute_open_branches(rf_chk),
+                    "obstacle": None,
+                    "flank_clearance_m": {
+                        "left": round(float(rf_chk.get("left90", 3.0)), 3),
+                        "right": round(float(rf_chk.get("right90", 3.0)), 3),
+                    },
+                    "after_status": _clean_status(hop_st),
+                }
+                return blocked_res, active_topo.observe_status(hop_st), hop_st, 0.0, 0, []
+
+        active_topo.begin_leg(hop_st)
+
+        rem = float(hop_max_dist)
+        hop_moved = 0.0
+        hop_segs = 0
+        hop_l_turns: list[str] = []
+        any_wall = False
+        max_segs = max_chain if auto_chain else 1
+        seg_res: dict | None = None
+
+        while hop_segs < max_segs and (hop_segs == 0 or rem > 0.02):
+            rf_cur = hop_st["sensors"]["rangefinders_m"]
+            l90 = float(rf_cur.get("left90", 3.0))
+            r90 = float(rf_cur.get("right90", 3.0))
+            l120 = float(rf_cur.get("left120", 3.0))
+            r120 = float(rf_cur.get("right120", 3.0))
+            truly_open_field = (min(l90, r90, l120, r120) > 1.35) or (
+                active_topo.is_open_space_start() and l90 > 0.85 and r90 > 0.85
+            )
+            seg_max = min(1.8 if truly_open_field else 3.5, rem)
+
+            seg_meta: dict[str, bool] = {}
+            seg_res = advance_segment(
                 call_fn,
-                degrees=turn_deg,
+                max_dist=seg_max,
+                speed_m_s=speed_m_s,
+                step_dt=step_dt,
+                _out_meta=seg_meta,
+                _target_odom_xy=target_odom_xy,
+                _ignore_target_ready=ignore_target_ready,
+            )
+            hop_segs += 1
+            seg_moved = float(seg_res["moved_m"])
+            hop_moved += seg_moved
+            rem = max(0.0, float(hop_max_dist) - hop_moved)
+            seg_saw_wall = bool(seg_meta.get("saw_corridor_wall", False))
+            any_wall = any_wall or seg_saw_wall
+            hop_st = seg_res["after_status"]
+
+            if not auto_chain or hop_segs >= max_segs or rem <= 0.15:
+                break
+            if hop_segs >= 2 and seg_moved < 0.20:
+                break
+            if seg_res["event"] != "junction":
+                break
+
+            end_sens = hop_st["sensors"]
+            end_x = float(end_sens.get("odom_x_m", 0.0))
+            end_y = float(end_sens.get("odom_y_m", 0.0))
+            if active_topo.nearest_existing_node(end_x, end_y, radius_m=NODE_MATCH_RADIUS_M) is not None:
+                break
+
+            branches = list(seg_res["open_branches"])
+            if branches not in (["left"], ["right"]):
+                break
+
+            vis = hop_st.get("vision", {})
+            if (not ignore_target_ready and vis.get("target_visible")) or vis.get("obstacles"):
+                break
+
+            rf_end = end_sens["rangefinders_m"]
+            end_l90 = float(rf_end.get("left90", 3.0))
+            end_r90 = float(rf_end.get("right90", 3.0))
+            end_l120 = float(rf_end.get("left120", 3.0))
+            end_r120 = float(rf_end.get("right120", 3.0))
+            blocked_side_rf = end_r90 if branches == ["left"] else end_l90
+            corridor_context = seg_saw_wall or (
+                blocked_side_rf <= 0.55 and min(end_l120, end_r120) < 1.35
+            )
+            if not corridor_context:
+                break
+
+            branch = branches[0]
+            cur_yaw = float(end_sens["gyro_yaw_deg"])
+            next_yaw = round((cur_yaw + (90.0 if branch == "left" else -90.0)) / 90.0) * 90.0
+            delta_deg = _wrap_angle_deg(next_yaw - cur_yaw)
+            hop_st = closed_loop_turn(
+                call_fn,
+                degrees=delta_deg,
                 max_speed_deg_s=200.0,
                 tol_deg=1.2,
                 include_vision=True,
                 release_stop=False,
                 fast_settle=True,
             )["after_status"]
-            active_topo.observe_status(st)
+            hop_l_turns.append(branch)
 
-    active_topo.begin_leg(st)
+        assert seg_res is not None
+        final_hop_st = seg_res["after_status"]
+        rf_final = final_hop_st["sensors"]["rangefinders_m"]
+        end_in_corridor = any_wall or (
+            min(float(rf_final.get("left90", 3.0)), float(rf_final.get("right90", 3.0))) <= 0.60
+            or float(rf_final.get("center", 3.0)) <= 0.55
+        )
+        if active_topo.is_open_space_start() and not any_wall:
+            end_in_corridor = False
 
-    # Bước 2: Chạy chặng phản xạ 20 Hz và tự nối qua góc chữ L chỉ có đúng 1 hướng rẽ ngang
-    remaining_dist = float(max_dist)
+        hop_topo = active_topo.finish_go(
+            seg_res["event"],
+            hop_moved,
+            final_hop_st,
+            in_corridor=end_in_corridor,
+        )
+        return seg_res, hop_topo, final_hop_st, hop_moved, hop_segs, hop_l_turns
+
     total_moved_m = 0.0
-    segments_chained = 0
-    auto_l_turns: list[str] = []
-    any_corridor_wall = False
-    max_segments = max_chain if auto_chain else 1
-    seg_res: dict | None = None
+    total_segments_chained = 0
+    all_auto_l_turns: list[str] = []
+    route_completed = 0
+    last_seg_res: dict | None = None
+    final_st = st
 
-    while segments_chained < max_segments and (segments_chained == 0 or remaining_dist > 0.02):
-        rf_cur = st["sensors"]["rangefinders_m"]
-        l90 = float(rf_cur.get("left90", 3.0))
-        r90 = float(rf_cur.get("right90", 3.0))
-        l120 = float(rf_cur.get("left120", 3.0))
-        r120 = float(rf_cur.get("right120", 3.0))
-        truly_open_field = (min(l90, r90, l120, r120) > 1.35) or (
-            active_topo.is_open_space_start() and l90 > 0.85 and r90 > 0.85
+    if route_steps is None:
+        hop_deg = single_target_deg
+        if hop_deg is None and stop_node_xy is not None and active_topo.is_open_space_start():
+            cx = float(st["sensors"].get("odom_x_m", 0.0))
+            cy = float(st["sensors"].get("odom_y_m", 0.0))
+            dx, dy = stop_node_xy[0] - cx, stop_node_xy[1] - cy
+            if math.hypot(dx, dy) > 0.18:
+                hop_deg = math.degrees(math.atan2(dy, dx))
+        last_seg_res, topo_snap, final_st, total_moved_m, total_segments_chained, all_auto_l_turns = _run_single_hop(
+            st,
+            hop_target_deg=hop_deg,
+            hop_max_dist=float(max_dist),
+            target_odom_xy=stop_node_xy,
+            check_blocked_before_drive=False,
         )
-        seg_max = min(1.8 if truly_open_field else 3.5, remaining_dist)
-
-        seg_meta: dict[str, bool] = {}
-        seg_res = advance_segment(
-            call_fn,
-            max_dist=seg_max,
-            speed_m_s=speed_m_s,
-            step_dt=step_dt,
-            _out_meta=seg_meta,
+    else:
+        num_steps = len(route_steps)
+        total_budget = (
+            max(float(max_dist), 6.0 * num_steps)
+            if (num_steps > 1 and abs(float(max_dist) - 6.0) < 1e-9)
+            else float(max_dist)
         )
-        segments_chained += 1
-        seg_moved = float(seg_res["moved_m"])
-        total_moved_m += seg_moved
-        remaining_dist = max(0.0, float(max_dist) - total_moved_m)
-        seg_saw_wall = bool(seg_meta.get("saw_corridor_wall", False))
-        any_corridor_wall = any_corridor_wall or seg_saw_wall
-        st = seg_res["after_status"]
+        cur_st = st
+        for idx, step_card in enumerate(route_steps):
+            is_last = idx == (num_steps - 1)
+            rem_budget = max(0.0, total_budget - total_moved_m)
+            if idx > 0 and rem_budget <= 0.05:
+                break
+            hop_budget = min(6.0, rem_budget) if num_steps > 1 else rem_budget
 
-        if not auto_chain or segments_chained >= max_segments or remaining_dist <= 0.15:
-            break
-        if segments_chained >= 2 and seg_moved < 0.20:
-            break
+            hop_target_xy: tuple[float, float] | None = None
+            is_intermediate_wp = False
+            if is_last and stop_node_xy is not None:
+                hop_target_xy = stop_node_xy
+            elif not is_last and active_topo.current_node is not None:
+                exits_cur = active_topo.nodes[active_topo.current_node].get("exits", {})
+                e_info = exits_cur.get(step_card)
+                if (
+                    isinstance(e_info, dict)
+                    and e_info.get("state") == "explored"
+                    and e_info.get("to_node") is not None
+                    and route_steps[idx + 1] != step_card
+                ):
+                    nid = int(e_info["to_node"])
+                    if 0 <= nid < len(active_topo.nodes):
+                        nx, ny = active_topo.nodes[nid]["xy"]
+                        hop_target_xy = (float(nx), float(ny))
+                        is_intermediate_wp = True
 
-        # Kiểm tra 5 điều kiện bắt buộc để tự động lướt góc chữ L 1 lối đi
-        if seg_res["event"] != "junction":
-            break
-        end_sens = st["sensors"]
-        end_x = float(end_sens.get("odom_x_m", 0.0))
-        end_y = float(end_sens.get("odom_y_m", 0.0))
-        if active_topo.nearest_existing_node(end_x, end_y, radius_m=NODE_MATCH_RADIUS_M) is not None:
-            break
+            hop_res, topo_snap, cur_st, h_moved, h_segs, h_turns = _run_single_hop(
+                cur_st,
+                hop_target_deg=cardinal_to_deg(step_card),
+                hop_max_dist=hop_budget,
+                target_odom_xy=hop_target_xy,
+                check_blocked_before_drive=(idx > 0),
+            )
+            last_seg_res = hop_res
+            final_st = cur_st
+            total_moved_m += h_moved
+            total_segments_chained += h_segs
+            all_auto_l_turns.extend(h_turns)
 
-        branches = list(seg_res["open_branches"])
-        if branches not in (["left"], ["right"]):
-            break
+            h_event = hop_res["event"]
+            if h_event == "route_blocked":
+                break
+            if is_intermediate_wp and h_event == "arrived_node":
+                h_event = "junction"
+                last_seg_res = {**hop_res, "event": "junction"}
 
-        vis = st.get("vision", {})
-        if vis.get("target_visible") or vis.get("obstacles"):
-            break
+            if is_last:
+                route_completed = num_steps if (topo_snap["current_node"] is not None or h_event in ("target_ready", "arrived_node")) else idx
+                break
 
-        rf_end = end_sens["rangefinders_m"]
-        end_l90 = float(rf_end.get("left90", 3.0))
-        end_r90 = float(rf_end.get("right90", 3.0))
-        end_l120 = float(rf_end.get("left120", 3.0))
-        end_r120 = float(rf_end.get("right120", 3.0))
-        blocked_side_rf = end_r90 if branches == ["left"] else end_l90
-        corridor_context = seg_saw_wall or (
-            blocked_side_rf <= 0.55 and min(end_l120, end_r120) < 1.35
-        )
-        if not corridor_context:
-            break
+            if (
+                h_event in ("dynamic_gate_ahead", "static_obstacle_ahead", "target_ready", "arrived_node", "dead_end", "max_dist")
+                or topo_snap["current_node"] is None
+            ):
+                route_completed = idx if topo_snap["current_node"] is None else (idx + 1)
+                break
+            route_completed = idx + 1
 
-        branch = branches[0]
-        cur_yaw = float(end_sens["gyro_yaw_deg"])
-        next_yaw = round((cur_yaw + (90.0 if branch == "left" else -90.0)) / 90.0) * 90.0
-        delta_deg = _wrap_angle_deg(next_yaw - cur_yaw)
-        st = closed_loop_turn(
-            call_fn,
-            degrees=delta_deg,
-            max_speed_deg_s=200.0,
-            tol_deg=1.2,
-            include_vision=True,
-            release_stop=False,
-            fast_settle=True,
-        )["after_status"]
-        auto_l_turns.append(branch)
+    assert last_seg_res is not None
+    final_event = str(last_seg_res["event"])
 
-    assert seg_res is not None
-    final_st = seg_res["after_status"]
-    rf_final = final_st["sensors"]["rangefinders_m"]
-    end_in_corridor = any_corridor_wall or (
-        min(float(rf_final.get("left90", 3.0)), float(rf_final.get("right90", 3.0))) <= 0.60
-        or float(rf_final.get("center", 3.0)) <= 0.55
-    )
-    if active_topo.is_open_space_start() and not any_corridor_wall:
-        end_in_corridor = False
+    # Tinh chỉnh nhẹ & gắn nhãn arrived_node nếu đã về đúng nút stop_at_node
+    if stop_at_node is not None and stop_node_xy is not None and final_event in ("junction", "dead_end", "arrived_node", "max_dist"):
+        fx = float(final_st["sensors"].get("odom_x_m", 0.0))
+        fy = float(final_st["sensors"].get("odom_y_m", 0.0))
+        d_final = math.hypot(fx - stop_node_xy[0], fy - stop_node_xy[1])
+        if d_final <= NODE_MATCH_RADIUS_M or topo_snap["current_node"] == stop_at_node:
+            if 0.20 <= d_final <= NODE_MATCH_RADIUS_M:
+                fyaw_rad = math.radians(float(final_st["sensors"]["gyro_yaw_deg"]))
+                proj = (stop_node_xy[0] - fx) * math.cos(fyaw_rad) + (stop_node_xy[1] - fy) * math.sin(fyaw_rad)
+                rf_trim = final_st["sensors"]["rangefinders_m"]
+                if proj > 0.12 and float(rf_trim["center"]) > proj + 0.25:
+                    trim_m = min(0.22, proj)
+                    trim_res = closed_loop_move(
+                        call_fn,
+                        meters=trim_m,
+                        speed_m_s=0.25,
+                        include_vision=True,
+                        release_stop=True,
+                    )
+                    final_st = trim_res["after_status"]
+                    total_moved_m += abs(float(trim_res.get("measured_meters", trim_m)))
+                    topo_snap = active_topo.observe_status(final_st)
+            final_event = "arrived_node"
 
-    topo_snap = active_topo.finish_go(
-        seg_res["event"],
-        total_moved_m,
-        final_st,
-        in_corridor=end_in_corridor,
-    )
     final_yaw = float(final_st["sensors"]["gyro_yaw_deg"])
-    final_branches = list(seg_res["open_branches"])
-    return {
-        "event": seg_res["event"],
+    final_branches = compute_open_branches(final_st["sensors"]["rangefinders_m"])
+    result_dict: dict[str, Any] = {
+        "event": final_event,
         "moved_m": round(total_moved_m, 4),
-        "segments_chained": segments_chained,
-        "auto_l_turns": auto_l_turns,
+        "segments_chained": total_segments_chained,
+        "auto_l_turns": all_auto_l_turns,
         "open_branches": final_branches,
         "open_cardinals": branches_to_cardinals(final_branches, final_yaw),
-        "obstacle": seg_res["obstacle"],
-        "flank_clearance_m": seg_res["flank_clearance_m"],
+        "obstacle": last_seg_res["obstacle"],
+        "flank_clearance_m": last_seg_res["flank_clearance_m"],
         "topo": topo_snap,
         "after_status": _clean_status(final_st),
     }
+    if route_steps is not None or stop_at_node is not None:
+        req = list(route_steps) if route_steps is not None else ([cardinal.strip().upper()] if cardinal is not None else [])
+        comp = route_completed if route_steps is not None else (1 if (req and final_event in ("arrived_node", "junction", "target_ready")) else 0)
+        result_dict["route_progress"] = {
+            "requested": req,
+            "completed": comp,
+            "remaining": list(req[comp:]) if comp < len(req) else [],
+            "stop_at_node": stop_at_node,
+        }
+    return result_dict
