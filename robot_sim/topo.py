@@ -129,35 +129,49 @@ def _save_store_atomic(state_path: Path, store: dict[str, Any]) -> None:
         raise last_err
 
 
+def read_topo_studio_details(
+    base_url: str = "http://127.0.0.1:8765",
+    state_path: Path | str = DEFAULT_TOPO_STATE_PATH,
+) -> tuple[int, int, int, int]:
+    """Đọc tóm tắt gọn (node_count, current_node_or_neg1, open_exits_count, goal_node_or_neg1) an toàn cho MuJoCo Studio."""
+    try:
+        path = Path(state_path)
+        if not path.is_file():
+            return 0, -1, 0, -1
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+        sessions = parsed.get("sessions", {}) if isinstance(parsed, dict) else {}
+        sess = sessions.get(normalize_base_url(base_url))
+        if not isinstance(sess, dict):
+            return 0, -1, 0, -1
+        nodes = sess.get("nodes", [])
+        if not isinstance(nodes, list) or not nodes:
+            return 0, -1, 0, -1
+        cur_node = sess.get("current_node")
+        cur_id = int(cur_node) if isinstance(cur_node, int) and not isinstance(cur_node, bool) else -1
+        open_exits = 0
+        goal_id = -1
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if node.get("kind") == "goal" and isinstance(node.get("id"), int) and not isinstance(node.get("id"), bool):
+                goal_id = int(node["id"])
+            exits = node.get("exits", {})
+            if isinstance(exits, dict):
+                for info in exits.values():
+                    if isinstance(info, dict) and info.get("state") == "open":
+                        open_exits += 1
+        return len(nodes), cur_id, open_exits, goal_id
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0, -1, 0, -1
+
+
 def read_topo_studio_summary(
     base_url: str = "http://127.0.0.1:8765",
     state_path: Path | str = DEFAULT_TOPO_STATE_PATH,
 ) -> tuple[int, int, int]:
     """Đọc tóm tắt gọn (node_count, current_node_or_neg1, open_exits_count) an toàn cho MuJoCo Studio."""
-    try:
-        path = Path(state_path)
-        if not path.is_file():
-            return 0, -1, 0
-        parsed = json.loads(path.read_text(encoding="utf-8"))
-        sessions = parsed.get("sessions", {}) if isinstance(parsed, dict) else {}
-        sess = sessions.get(normalize_base_url(base_url))
-        if not isinstance(sess, dict):
-            return 0, -1, 0
-        nodes = sess.get("nodes", [])
-        if not isinstance(nodes, list) or not nodes:
-            return 0, -1, 0
-        cur_node = sess.get("current_node")
-        cur_id = int(cur_node) if isinstance(cur_node, int) and not isinstance(cur_node, bool) else -1
-        open_exits = 0
-        for node in nodes:
-            exits = node.get("exits", {}) if isinstance(node, dict) else {}
-            if isinstance(exits, dict):
-                for info in exits.values():
-                    if isinstance(info, dict) and info.get("state") == "open":
-                        open_exits += 1
-        return len(nodes), cur_id, open_exits
-    except (OSError, ValueError, KeyError, TypeError):
-        return 0, -1, 0
+    node_count, cur_id, open_exits, _ = read_topo_studio_details(base_url=base_url, state_path=state_path)
+    return node_count, cur_id, open_exits
 
 
 class TopologicalOdometer:
@@ -567,6 +581,28 @@ class TopologicalOdometer:
             self._ensure_start_node(x, y, yaw_deg, rf)
 
         step_m = max(0.0, float(moved_m))
+        if event == "target_ready":
+            if self.pending_leg is None and self.current_node is not None:
+                self.pending_leg = {
+                    "from_node": int(self.current_node),
+                    "depart_port": yaw_to_cardinal(yaw_deg),
+                    "dist_m": round(step_m, 4),
+                    "approach_yaw_deg": round(yaw_deg, 3),
+                }
+            elif self.pending_leg is not None:
+                self.pending_leg["dist_m"] = round(float(self.pending_leg.get("dist_m", 0.0)) + step_m, 4)
+                self.pending_leg["approach_yaw_deg"] = round(yaw_deg, 3)
+
+            matched_goal = self.nearest_existing_node(x, y)
+            if matched_goal is not None and self.nodes[matched_goal].get("kind") == "goal":
+                self.current_node = matched_goal
+                self._complete_pending_leg(matched_goal, yaw_deg, dest_existed=True)
+            else:
+                self.current_node = None
+                self.loop_closed = False
+            self._persist()
+            return self.export_dict()
+
         if self.pending_leg is not None:
             self.pending_leg["dist_m"] = round(float(self.pending_leg.get("dist_m", 0.0)) + step_m, 4)
 
@@ -593,6 +629,126 @@ class TopologicalOdometer:
         else:
             self.current_node = None
             self.loop_closed = False
+
+        self._persist()
+        return self.export_dict()
+
+    def record_dock(self, moved_m: float, status: dict, *, reached: bool) -> dict:
+        """Ghi nhận nút đích (kind='goal') sau khi dock thành công, bảo toàn góc hành lang tiếp cận."""
+        if not reached:
+            return self.observe_status(status)
+
+        sim_time, x, y, odom_dist, yaw_deg, rf = self._extract_sensors(status)
+        self._check_auto_reset(sim_time, x, y, odom_dist, yaw_deg)
+        self._record_telemetry_cursor(sim_time, x, y, odom_dist, yaw_deg)
+        if not self.nodes:
+            self._ensure_start_node(x, y, yaw_deg, rf)
+
+        step_m = max(0.0, float(moved_m))
+        if self.pending_leg is not None:
+            self.pending_leg["dist_m"] = round(float(self.pending_leg.get("dist_m", 0.0)) + step_m, 4)
+        elif self.current_node is not None and self.nodes[self.current_node].get("kind") != "goal":
+            self.pending_leg = {
+                "from_node": int(self.current_node),
+                "depart_port": yaw_to_cardinal(yaw_deg),
+                "dist_m": round(step_m, 4),
+                "approach_yaw_deg": round(yaw_deg, 3),
+            }
+
+        # Tìm nút goal hiện có trong bán kính 0.55m, nếu chưa có thì nâng cấp nút trùng vị trí hoặc tạo mới
+        goal_id: int | None = None
+        dest_existed = False
+        best_goal_dist = 0.55 + 1e-9
+        for node in self.nodes:
+            if node.get("kind") == "goal":
+                d_g = math.hypot(x - float(node["xy"][0]), y - float(node["xy"][1]))
+                if d_g <= 0.55 and d_g < best_goal_dist:
+                    best_goal_dist = d_g
+                    goal_id = int(node["id"])
+                    dest_existed = True
+
+        if goal_id is not None:
+            self.nodes[goal_id]["xy"] = [round(x, 3), round(y, 3)]
+        else:
+            from_node_id = int(self.pending_leg["from_node"]) if isinstance(self.pending_leg, dict) else None
+            matched = self.nearest_existing_node(x, y, radius_m=NODE_MATCH_RADIUS_M)
+            if (
+                matched is not None
+                and matched != 0
+                and matched != from_node_id
+            ):
+                goal_id = matched
+                dest_existed = True
+                self.nodes[goal_id]["kind"] = "goal"
+                self.nodes[goal_id]["xy"] = [round(x, 3), round(y, 3)]
+            else:
+                goal_id = len(self.nodes)
+                self.nodes.append(
+                    {
+                        "id": goal_id,
+                        "xy": [round(x, 3), round(y, 3)],
+                        "kind": "goal",
+                        "exits": {},
+                    }
+                )
+
+        # Trên sân mở, nếu pending_leg đã bị hủy do lách vật cản tĩnh, nối cạnh thẳng từ Node #0 tới Node #G
+        if self.pending_leg is None and self.is_open_space_start() and goal_id != 0:
+            sx, sy = float(self.nodes[0]["xy"][0]), float(self.nodes[0]["xy"][1])
+            dx, dy = x - sx, y - sy
+            vec_dist = round(math.hypot(dx, dy), 3)
+            vec_yaw = math.degrees(math.atan2(dy, dx)) if vec_dist > 1e-6 else yaw_deg
+            self.pending_leg = {
+                "from_node": 0,
+                "depart_port": yaw_to_cardinal(vec_yaw),
+                "dist_m": vec_dist,
+                "approach_yaw_deg": round(vec_yaw, 3),
+            }
+
+        if self.pending_leg is not None:
+            arr_yaw = float(self.pending_leg.get("approach_yaw_deg", yaw_deg))
+            self._complete_pending_leg(goal_id, arr_yaw, dest_existed=dest_existed)
+        else:
+            self.loop_closed = False
+
+        self.current_node = goal_id
+        if not self.is_open_space_start() and is_cardinal_aligned(yaw_deg):
+            self._update_node_ports(goal_id, rf, yaw_deg)
+
+        self._persist()
+        return self.export_dict()
+
+    def reset_for_repass(
+        self,
+        status: dict | None = None,
+        *,
+        target_changed: bool = False,
+    ) -> dict:
+        """Giữ nguyên cấu trúc bản đồ đã học cho Lượt 2, đặt lại bộ đếm visits và đồng bộ cursor về mốc reset mới."""
+        for node in self.nodes:
+            exits = node.get("exits", {})
+            if isinstance(exits, dict):
+                for info in exits.values():
+                    if isinstance(info, dict):
+                        info["out_visits"] = 0
+                        info["in_visits"] = 0
+            if target_changed and node.get("kind") == "goal":
+                node["kind"] = "junction" if isinstance(exits, dict) and len(exits) >= 2 else "dead_end"
+
+        self.current_node = 0 if self.nodes else None
+        self.pending_leg = None
+        self.loop_closed = False
+
+        if status is not None:
+            sim_time, x, y, odom_dist, yaw_deg, rf = self._extract_sensors(status)
+            self._record_telemetry_cursor(sim_time, x, y, odom_dist, yaw_deg)
+            if not self.nodes:
+                self._ensure_start_node(x, y, yaw_deg, rf)
+        else:
+            self.last_sim_time = None
+            self.last_odom_dist_m = None
+            self.last_gyro_yaw_deg = 0.0
+            self.last_odom_xy = [0.0, 0.0]
 
         self._persist()
         return self.export_dict()

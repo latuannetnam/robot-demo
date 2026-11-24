@@ -693,3 +693,214 @@ def test_cross_dynamic_gate_passes_when_piston_retracted_at_edge():
     res = cross_dynamic_gate(fake_call, timeout_s=4.0)
     assert res["crossed"] is True
     assert res["moved_m"] >= 0.65
+
+
+def test_topo_record_dock_uses_approach_yaw_and_connects_open_space_without_pending_leg(tmp_path: Path):
+    """Task 1: dock at oblique angle uses target_ready corridor approach_yaw_deg; open_space connects Node #0 <-> #G even if pending_leg was cancelled."""
+    from robot_sim.topo import read_topo_studio_details
+
+    # 1. Corridor approach at yaw=0° -> oblique dock at yaw=+28°
+    state_file = tmp_path / ".topo_corridor.json"
+    topo = TopologicalOdometer("http://127.0.0.1:8765", state_path=state_file)
+    rf_start = {"left": 0.9, "center": 1.8, "right": 0.9, "left90": 0.35, "right90": 0.35}
+    topo.observe_status(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_start))
+    topo.begin_leg(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_start))
+    snap_ready = topo.finish_go(
+        "target_ready",
+        1.20,
+        _mk_status(
+            sim_time=2.5,
+            x=1.20,
+            y=0.0,
+            odom_dist=1.20,
+            yaw_deg=0.0,
+            rf={"left": 0.9, "center": 0.72, "right": 0.9, "left90": 0.40, "right90": 0.40},
+        ),
+        in_corridor=True,
+    )
+    assert snap_ready["pending_from_node"] == 0
+
+    # Unsuccessful dock must preserve pending_leg and create no goal node
+    snap_fail = topo.record_dock(
+        0.10,
+        _mk_status(
+            sim_time=2.8,
+            x=1.30,
+            y=0.02,
+            odom_dist=1.30,
+            yaw_deg=12.0,
+            rf={"left": 0.8, "center": 0.60, "right": 0.8, "left90": 0.40, "right90": 0.40},
+        ),
+        reached=False,
+    )
+    assert len(snap_fail["nodes"]) == 1
+    assert snap_fail["pending_from_node"] == 0
+
+    # Successful dock at oblique +28° (still anchors goal using approach_yaw=0° -> p_in='W')
+    snap_goal = topo.record_dock(
+        0.45,
+        _mk_status(
+            sim_time=3.5,
+            x=1.65,
+            y=0.18,
+            odom_dist=1.65,
+            yaw_deg=28.0,
+            rf={"left": 0.7, "center": 0.27, "right": 0.7, "left90": 0.45, "right90": 0.45},
+        ),
+        reached=True,
+    )
+    assert snap_goal["current_node"] == 1
+    assert snap_goal["pending_from_node"] is None
+    assert len(snap_goal["nodes"]) == 2
+    assert snap_goal["nodes"][1]["kind"] == "goal"
+    assert snap_goal["nodes"][0]["exits"]["E"]["to_node"] == 1
+    assert snap_goal["nodes"][1]["exits"]["W"]["to_node"] == 0
+    assert snap_goal["nodes"][1]["exits"]["W"]["dist_m"] == pytest.approx(1.65, abs=0.01)
+    assert "E" not in snap_goal["nodes"][1]["exits"]
+    assert read_topo_studio_details("http://127.0.0.1:8765", state_path=state_file) == (2, 1, 0, 1)
+
+    # 2. Open-space start where static-obstacle detour cancelled pending_leg before dock
+    state_open = tmp_path / ".topo_open.json"
+    topo_open = TopologicalOdometer("http://127.0.0.1:8765", state_path=state_open)
+    rf_open = {"left": 2.0, "center": 2.5, "right": 2.0, "left90": 1.8, "right90": 1.8}
+    topo_open.observe_status(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_open))
+    assert topo_open.is_open_space_start() is True
+    topo_open.cancel_pending_leg(_mk_status(sim_time=2.0, x=1.5, y=0.4, odom_dist=1.8, yaw_deg=-25.0, rf=rf_open))
+    snap_open_goal = topo_open.record_dock(
+        0.35,
+        _mk_status(
+            sim_time=3.0,
+            x=2.80,
+            y=0.10,
+            odom_dist=3.10,
+            yaw_deg=-5.0,
+            rf={"left": 1.2, "center": 0.26, "right": 1.2, "left90": 1.6, "right90": 1.6},
+        ),
+        reached=True,
+    )
+    assert snap_open_goal["current_node"] == 1
+    assert snap_open_goal["nodes"][1]["kind"] == "goal"
+    assert snap_open_goal["nodes"][0]["exits"]["E"]["to_node"] == 1
+    assert snap_open_goal["nodes"][1]["exits"]["W"]["to_node"] == 0
+
+
+def test_topo_reset_for_repass_preserves_map_zeros_visits_and_handles_target_change(tmp_path: Path):
+    """Task 1: reset_for_repass keeps nodes/edges, zeroes visit counts, prevents auto-reset wipe at sim_time=0, and downgrades goal on target_changed."""
+    from robot_sim.topo import read_topo_studio_details
+
+    state_file = tmp_path / ".topo_repass.json"
+    topo = TopologicalOdometer("http://127.0.0.1:8765", state_path=state_file)
+    rf_cor = {"left": 0.9, "center": 1.8, "right": 0.9, "left90": 0.35, "right90": 0.35}
+    topo.observe_status(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    topo.begin_leg(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    topo.finish_go(
+        "junction",
+        1.20,
+        _mk_status(
+            sim_time=3.0,
+            x=1.20,
+            y=0.0,
+            odom_dist=1.20,
+            yaw_deg=0.0,
+            rf={"left": 0.8, "center": 0.32, "right": 0.8, "left90": 1.5, "right90": 0.35},
+        ),
+        in_corridor=True,
+    )
+    topo.begin_leg(_mk_status(sim_time=3.1, x=1.20, y=0.0, odom_dist=1.20, yaw_deg=90.0))
+    topo.finish_go(
+        "target_ready",
+        1.00,
+        _mk_status(sim_time=5.0, x=1.20, y=1.00, odom_dist=2.20, yaw_deg=90.0, rf=rf_cor),
+        in_corridor=True,
+    )
+    topo.record_dock(
+        0.40,
+        _mk_status(
+            sim_time=6.0,
+            x=1.20,
+            y=1.40,
+            odom_dist=2.60,
+            yaw_deg=90.0,
+            rf={"left": 0.7, "center": 0.26, "right": 0.7, "left90": 0.35, "right90": 0.35},
+        ),
+        reached=True,
+    )
+    assert read_topo_studio_details("http://127.0.0.1:8765", state_path=state_file)[3] == 2
+
+    # Repass reset with same target
+    snap_repass = topo.reset_for_repass(
+        _mk_status(sim_time=0.0, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor),
+        target_changed=False,
+    )
+    assert snap_repass["current_node"] == 0
+    assert len(snap_repass["nodes"]) == 3
+    assert snap_repass["nodes"][2]["kind"] == "goal"
+    for node in snap_repass["nodes"]:
+        for info in node["exits"].values():
+            assert info["out_visits"] == 0
+            assert info["in_visits"] == 0
+
+    # Reload from disk and observe at sim_time=0.1 -> MUST NOT auto-reset wipe!
+    topo2 = TopologicalOdometer("http://127.0.0.1:8765", state_path=state_file)
+    snap_after = topo2.observe_status(_mk_status(sim_time=0.1, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor))
+    assert len(snap_after["nodes"]) == 3
+    assert snap_after["nodes"][2]["kind"] == "goal"
+
+    # Repass reset with target_changed=True downgrades stale goal node
+    snap_reloc = topo2.reset_for_repass(
+        _mk_status(sim_time=0.0, x=0.0, y=0.0, odom_dist=0.0, yaw_deg=0.0, rf=rf_cor),
+        target_changed=True,
+    )
+    assert snap_reloc["nodes"][2]["kind"] == "dead_end"
+    assert read_topo_studio_details("http://127.0.0.1:8765", state_path=state_file)[3] == -1
+
+
+def test_dock_target_reports_moved_m():
+    """Task 1: dock_target returns moved_m on both refusal and reached paths."""
+    from robot_sim.skills import dock_target
+
+    # Refusal path
+    st_far = {
+        "sim_time": 1.0,
+        "moving": False,
+        "sensors": {"rangefinders_m": {"left": 1.5, "center": 1.5, "right": 1.5}, "odom_dist_m": 2.0},
+        "vision": {"target_visible": False, "target": None, "obstacles": []},
+    }
+    res_ref = dock_target(lambda p, m, b=None: st_far)
+    assert res_ref["reached"] is False
+    assert res_ref["moved_m"] == 0.0
+
+    # Reached path
+    odom_val = {"d": 2.0}
+
+    def fake_dock_call(path: str, method: str, body: dict | None = None):
+        if path == "/wheels":
+            if body and float(body.get("left", 0.0)) > 0.1:
+                odom_val["d"] += 0.20
+            return {"ok": True}
+        if path == "/stop":
+            return {"stopped": True, "sim_time": 1.5}
+        return {
+            "sim_time": 1.5,
+            "moving": False,
+            "sensors": {
+                "rangefinders_m": {
+                    "left": 0.9,
+                    "center": 0.42 if odom_val["d"] < 2.15 else 0.26,
+                    "right": 0.9,
+                },
+                "odom_dist_m": round(odom_val["d"], 4),
+                "forward_speed_m_s": 0.0,
+                "yaw_rate_rad_s": 0.0,
+                "gyro_yaw_deg": 0.0,
+            },
+            "vision": {
+                "target_visible": True,
+                "target": {"offset_x": 0.02, "side": "center", "area_pct": 12.0, "v_span": 0.45},
+                "obstacles": [],
+            },
+        }
+
+    res_ok = dock_target(fake_dock_call, stop_distance=0.25)
+    assert res_ok["reached"] is True
+    assert res_ok["moved_m"] == pytest.approx(0.20, abs=0.01)

@@ -3113,6 +3113,11 @@ def dock_target(
 
     watchdog_dur = round(max(0.35, step_dt * 3.0), 3)
     st = call_fn("/status?vision=1", "GET", None)
+    odom0 = float(st["sensors"].get("odom_dist_m", 0.0))
+
+    def _dock_moved(end_st: dict) -> float:
+        cur_odom = float(end_st["sensors"].get("odom_dist_m", odom0))
+        return round(max(0.0, cur_odom - odom0), 4)
 
     def _refusal(cur_st: dict) -> str | None:
         vis = cur_st.get("vision", {})
@@ -3145,6 +3150,7 @@ def dock_target(
             "reached": False,
             "reason": init_err,
             "steps": 0,
+            "moved_m": 0.0,
             "after_status": _clean_status(st),
         }
 
@@ -3200,6 +3206,7 @@ def dock_target(
                         "reached": False,
                         "reason": "obstacle_blocking",
                         "steps": steps_taken,
+                        "moved_m": _dock_moved(settled),
                         "after_status": _clean_status(settled),
                     }
             else:
@@ -3211,6 +3218,7 @@ def dock_target(
                         "reached": False,
                         "reason": "not_visible",
                         "steps": steps_taken,
+                        "moved_m": _dock_moved(settled),
                         "after_status": _clean_status(settled),
                     }
                 w_spin = 2.8 if last_offset_x >= 0.0 else -2.8
@@ -3245,6 +3253,7 @@ def dock_target(
                         "reached": True,
                         "reason": "reached_target",
                         "steps": steps_taken,
+                        "moved_m": _dock_moved(settled),
                         "after_status": _clean_status(settled),
                     }
 
@@ -3281,6 +3290,7 @@ def dock_target(
             "reached": ok,
             "reason": "reached_target" if ok else "max_steps",
             "steps": steps_taken,
+            "moved_m": _dock_moved(settled),
             "after_status": _clean_status(settled),
         }
     finally:
